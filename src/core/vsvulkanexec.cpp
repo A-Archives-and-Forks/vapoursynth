@@ -59,17 +59,25 @@ void VSVulkanExecPool::settleRetained(VSVulkanExecContext &context) {
 }
 
 void VSVulkanExecPool::releaseRetained(VSVulkanExecContext &context) {
+    /* Registered with the device while it runs, so a waitAll on another thread waits for
+       these releases exactly as it does for a device sweep's. The caller holds the claim,
+       which is what makes the list safe to look at here. */
+    if (context.retained.empty()) {
+        settleRetained(context);
+        return;
+    }
+    dev->beginExecReleases(this);
+    releaseRetainedNow(context);
+    dev->endExecReleases(this);
+}
+
+void VSVulkanExecPool::releaseRetainedNow(VSVulkanExecContext &context) {
     settleRetained(context);
     /* Moved out first, so a release that reaches back into the pool never meets a list in
-       the middle of being walked; registered with the device while it runs, so a waitAll
-       on another thread waits for these releases exactly as it does for a device sweep's. */
+       the middle of being walked. */
     std::vector<VSVulkanExecRetained> retained = std::move(context.retained);
     context.retained.clear();
-    if (retained.empty())
-        return;
-    dev->beginExecReleases(this);
     runReleases(retained);
-    dev->endExecReleases(this);
 }
 
 void VSVulkanExecPool::abandon(VSVulkanExecContext &context) {
@@ -214,16 +222,28 @@ VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
     }
 
     /* The GPU may still be chewing on this context's previous submission. Waiting it out here,
-       outside every lock, is what lets the other contexts keep submitting meanwhile. */
+       outside every lock, is what lets the other contexts keep submitting meanwhile.
+
+       What that submission retained is registered as a batch before the wait, not after it:
+       from the moment the claim was won no sweep can reach it, and this thread is the one that
+       will release it, so a waitAll elsewhere, or an allocation that failed at the driver, has
+       to be able to wait for it now. The GPU finishing while the acquirer is still waking is
+       exactly the window in which that memory would otherwise be unreachable by anyone. A
+       never submitted context retains nothing: abandon and a failed submit release at once. */
     if (context->pendingValue) {
-        if (!waitValue(context->pendingValue, errorMessage)) {
+        const bool holds = !context->retained.empty();
+        if (holds)
+            dev->beginExecReleases(this);
+        const bool done = waitValue(context->pendingValue, errorMessage);
+        if (done)
+            releaseRetainedNow(*context);
+        if (holds)
+            dev->endExecReleases(this);
+        if (!done) {
             releaseClaim(*context);
             return nullptr;
         }
     }
-
-    /* The previous submission is done, so everything it kept alive can go now. */
-    releaseRetained(*context);
 
     VkResult res = dev->vk.vkResetCommandPool(dev->device(), context->commandPool, 0);
     if (res != VK_SUCCESS) {

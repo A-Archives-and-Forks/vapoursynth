@@ -517,20 +517,27 @@ public:
        whose context was never acquired again. See VSVulkanExecPool::sweepCompleted.
 
        Every batch of releases run on a pool's behalf -- by the device sweep, by the pool's
-       own sweep from submit or waitAll, or by acquire reaping a context's last submission --
-       is registered here for as long as it runs, with the thread running it. Unregistering
-       waits until no other thread still holds such a batch for the pool, so once it returns
-       every release callback the pool registered has run; waitExecReleases is that wait
-       alone, for gpuExecPoolWaitIdle's promise of the same. waitForeignExecReleases waits
-       for other threads' batches of every pool, which is what an allocation that failed at
-       the driver needs before concluding the device is really full. The running thread's
-       own batches never count, so nothing here waits on itself. */
+       own sweep from submit or waitAll, or by acquire reaping a context's last submission,
+       registered from the moment the claim is won since the retentions are unreachable by
+       any sweep from then on -- is registered here for as long as it runs, with the thread
+       running it and a sequence number. Unregistering waits until no other thread still
+       holds such a batch for the pool, so once it returns every release callback the pool
+       registered has run; waitExecReleases is that wait alone, for gpuExecPoolWaitIdle's
+       promise of the same. waitForeignExecReleases waits, for a bounded time, for the
+       batches other threads held when it was called -- not for ones started later, which
+       under load would never let it return -- which is what an allocation that failed at
+       the driver needs before concluding the device is really full.
+
+       The running thread's own batches never count, so a release callback that allocates or
+       acquires elsewhere cannot wait on itself. Freeing or waiting on the pool a batch
+       belongs to from inside that batch is a different thing: the remaining releases would
+       run against a pool that is gone, so it fails fatally instead of returning early. */
     void registerExecPool(VSVulkanExecPool *pool);
     void unregisterExecPool(VSVulkanExecPool *pool);
     void beginExecReleases(VSVulkanExecPool *pool);
     void endExecReleases(VSVulkanExecPool *pool);
     void waitExecReleases(VSVulkanExecPool *pool);
-    bool waitForeignExecReleases();
+    void waitForeignExecReleases();
     void sweepExecPools();
 
     /* The in-flight retention budget. Per pool contextCount caps multiply across a graph's
@@ -627,10 +634,18 @@ private:
     struct ExecReleaseBatch {
         VSVulkanExecPool *pool;
         std::thread::id thread;
+        uint64_t id;
     };
     std::vector<ExecReleaseBatch> execReleasesInFlight;
-    /* Lock held. A null pool means any pool. */
-    bool execReleasesPending(const VSVulkanExecPool *pool) const;
+    uint64_t nextExecReleaseBatch = 1;
+    /* Lock held. A null pool means any pool; only batches numbered below `before` count, so a
+       waiter can name the ones that existed when it started. */
+    bool execReleasesPending(const VSVulkanExecPool *pool, uint64_t before) const;
+    /* Lock held. Fails fatally when the calling thread is inside one of the pool's own
+       release batches, which is the contract violation both rendezvous refuse to hide. */
+    void failIfInsideOwnBatch(const VSVulkanExecPool *pool, const char *what) const;
+    /* Lock held. Removes the given thread's newest batch for the pool; the caller notifies. */
+    void endExecReleasesLocked(VSVulkanExecPool *pool, std::thread::id thread);
     std::atomic<uint64_t> execRetainedBytes{0};
     std::atomic<uint64_t> execRetainedBudget{0};
     /* Signaled once per compute queue submission; the counter is guarded by the compute

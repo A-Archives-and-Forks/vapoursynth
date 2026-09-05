@@ -259,32 +259,33 @@ bool VSVulkanDevice::allocatePooled(const VkMemoryRequirements &req, VkMemoryPro
         carveAlignment = regionGranularity;
     }
 
-    if (!allocator.allocate(*this, typeIndex, request, carveAlignment, exportable, region.block,
-            region.offset, region.size, errorMessage)) {
-        sweepExecPools();
-        /* The sweep may have found nothing because another thread's sweep already holds
-           everything reclaimable and is still running its releases; those regions are back
-           the moment it finishes, so it is waited for and the allocation retried before any
-           escalation. Without this a frame could fail -- fatally, in frame creation -- with
-           the memory it needed microseconds from the free list. */
-        waitForeignExecReleases();
+    /* The reclamation ladder, one rung per failed attempt. The first rung sweeps the exec
+       pools, then waits for the releases other threads already had in flight -- a sweep may
+       find nothing because another thread's sweep holds everything reclaimable and is still
+       running it, and those regions are back the moment it finishes; without the wait a frame
+       could fail, fatally in frame creation, with the memory it needed microseconds from the
+       free list -- and sweeps again so what completed meanwhile is reaped rather than left to
+       the next rung. The second rung is the pressure callback, which evicts every cached GPU
+       frame: the blunt step, taken only once the cheap ones have failed. */
+    for (int rung = 0;; rung++) {
         errorMessage.clear();
         if (allocator.allocate(*this, typeIndex, request, carveAlignment, exportable, region.block,
-                region.offset, region.size, errorMessage)) {
-            region.usableOffset = (region.offset + req.alignment - 1) & ~(req.alignment - 1);
-            assert(region.usableOffset + req.size <= region.offset + region.size);
-            return true;
-        }
-        /* userData before the function, mirroring the retraction's opposite order, so
-           observing a function guarantees the userData loaded with it is the matching one. */
-        void *pressureCtx = pressureUserData.load();
-        VSVulkanPressureFn pressure = pressureFn.load();
-        if (pressure)
-            pressure(pressureCtx);
-        errorMessage.clear();
-        if (!allocator.allocate(*this, typeIndex, request, carveAlignment, exportable, region.block,
                 region.offset, region.size, errorMessage))
+            break;
+        if (rung == 0) {
+            sweepExecPools();
+            waitForeignExecReleases();
+            sweepExecPools();
+        } else if (rung == 1) {
+            /* userData before the function, mirroring the retraction's opposite order, so
+               observing a function guarantees the userData loaded with it is the matching one. */
+            void *pressureCtx = pressureUserData.load();
+            VSVulkanPressureFn pressure = pressureFn.load();
+            if (pressure)
+                pressure(pressureCtx);
+        } else {
             return false;
+        }
     }
 
     region.usableOffset = (region.offset + req.alignment - 1) & ~(req.alignment - 1);

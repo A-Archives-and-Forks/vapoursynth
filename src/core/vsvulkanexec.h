@@ -197,6 +197,8 @@ private:
     void releaseClaim(VSVulkanExecContext &context);
     void settleRetained(VSVulkanExecContext &context);
     void releaseRetained(VSVulkanExecContext &context);
+    /* releaseRetained without the batch registration, for a caller that registered earlier. */
+    void releaseRetainedNow(VSVulkanExecContext &context);
 
     VSVulkanDevice *dev = nullptr;
     VSVulkanQueue *q = nullptr;

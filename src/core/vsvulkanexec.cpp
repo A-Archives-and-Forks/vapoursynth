@@ -27,6 +27,13 @@ VSVulkanExecPool::~VSVulkanExecPool() {
        a sweep is walking the pools or still running releases it detached from this one, so
        after it returns no sweep can be touching this pool and every release has run. */
     dev->unregisterExecPool(this);
+    /* With the pool off the registry a claim can only belong to a thread still using it --
+       recording, or inside acquire -- and nothing below could survive that: the retention
+       lists would be released under the holder and the command pools destroyed under its
+       recording. Waiting for the claim would not help either, since submit keeps touching
+       the pool after it drops the claim. The core never destroys a node while a frame
+       request on it runs, so this only ever names a bug. */
+    failIfAnyContextHeld("freeGPUExecPool");
     std::string ignored;
     waitAll(ignored);
     for (auto &context : contexts) {
@@ -47,6 +54,15 @@ void VSVulkanExecPool::failUnlessOwner(const VSVulkanExecContext &context, const
     }
 }
 
+void VSVulkanExecPool::failIfAnyContextHeld(const char *what) const {
+    for (const auto &context : contexts) {
+        if (context->claimed.load(std::memory_order_acquire)) {
+            std::string message = std::string(what) + " called while a context of the pool is still held";
+            vulkanFatal(message.c_str());
+        }
+    }
+}
+
 void VSVulkanExecPool::failIfHoldingContext(const char *what) const {
     const std::thread::id me = std::this_thread::get_id();
     for (const auto &context : contexts) {
@@ -60,7 +76,11 @@ void VSVulkanExecPool::failIfHoldingContext(const char *what) const {
 void VSVulkanExecPool::retain(VSVulkanExecContext &context, VSGPUReleaseFunc release, void *object, VkDeviceSize bytes) {
     failUnlessOwner(context, "gpuExecRetain");
     context.retained.push_back({ release, object });
-    context.retainedBytes += bytes;
+    /* Only a pool whose submissions signal the progress timeline meters its bytes: a gated
+       thread sleeps on that timeline, and bytes only a poll could discover would turn every
+       wait for them into the poll's full interval. */
+    if (signalsProgress)
+        context.retainedBytes += bytes;
 }
 
 /* The bytes leave the device total before any release runs, not after: a release callback
@@ -175,6 +195,17 @@ void VSVulkanExecPool::detachCompleted(std::vector<VSVulkanExecRetained> &out) {
     uint64_t counter = 0;
     if (dev->vk.vkGetSemaphoreCounterValue(dev->device(), timeline->semaphore(), &counter) != VK_SUCCESS)
         return;
+    /* The timeline advances only through this pool's own submissions, and nextValue is the
+       last value it ever signalled, so a counter past it can only mean something else
+       signalled the semaphore -- which would make every pending submission look complete
+       below and hand the GPU's inputs back while it still reads them. nextValue is read after
+       the counter, under the queue lock, so a submission racing in between can only raise
+       it: no false positives. */
+    {
+        std::lock_guard<VSVulkanQueue> queueLock(*q);
+        if (counter > nextValue)
+            vulkanFatal("the exec pool's timeline was signalled from outside the pool: its counter is past the last value the pool submitted");
+    }
     for (auto &context : contexts) {
         /* The claim is the only thing that may be looked at unclaimed. Skipping on an
            empty retention list would be cheaper, but retain() pushes onto that vector

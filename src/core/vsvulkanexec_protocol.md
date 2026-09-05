@@ -8,8 +8,8 @@ every change must keep. The public contract it describes is the one in `VSVulkan
 two disagree, the header is what plugins were promised and this file is what needs fixing.
 
 Verified against the tree of 2026-09-05 (the release-batch registry with sequence numbers and
-the enforced caller rules I15 to I18). Section 11 lists invariants that are *not* enforced yet
-and what each would rule out.
+the enforced rules I15 to I21). Section 11 lists invariants that are *not* enforced yet and
+what each would rule out.
 
 ## 1. Objects and ownership
 
@@ -37,8 +37,9 @@ pool has one context per staging slot and never retains anything.
 | `VSNode::cacheMutex` | one node's cache and consumer list |
 
 Order, outermost first: `execPoolsMutex` before `claimMutex` (a device sweep releases claims
-while walking the registry); `cacheLock` before `cacheMutex` (eviction); the queue lock and the
-allocator mutex nest inside nothing in this code and take nothing. `registerCache` is called
+while walking the registry) and before the queue lock (`detachCompleted` reads `nextValue` for
+the counter check); `cacheLock` before `cacheMutex` (eviction); the queue lock and the allocator
+mutex take nothing themselves. `registerCache` is called
 after `cacheMutex` is released, never under it. **No lock in this table is held while a release
 callback runs**, and `execPoolsMutex` is never held while calling into anything a plugin wrote.
 
@@ -66,9 +67,10 @@ fresh ──acquire──▶ recording ──submit ok──▶ pending ──GP
 - **abandon**: release the retentions (uncounted) and drop the claim.
 - **completed**: a context nobody holds whose `pendingValue` the timeline has reached. Any
   reaper may claim it by CAS and detach its retentions.
-- **destruction** (`~VSVulkanExecPool`): unregister (fatal from inside one of the pool's own
-  batches; waits for every other thread's batch for the pool), `waitAll`, release what the
-  contexts still hold, destroy the command pools, drop the timeline reference.
+- **destruction** (`~VSVulkanExecPool`): unregister (fatal from inside a release batch; waits
+  for every other thread's batch for the pool), fatal if any context is still claimed,
+  `waitAll`, release what the contexts still hold, destroy the command pools, drop the
+  timeline reference.
 
 ## 4. Reaping and the batch registry
 
@@ -82,9 +84,11 @@ Who runs releases, and from where:
 | `abandon`, failed `submit` | the caller | that recording's uncounted retentions |
 | destructor | `freeGPUExecPool` | everything left |
 
-`detachCompleted` reads the pool timeline once, skips claimed contexts, wins the claim by CAS
-on the rest, and for each completed one settles the bytes and moves the list out before
-dropping the claim. Releases run only after that, from a local list, with no lock held.
+`detachCompleted` reads the pool timeline once, checks the counter against `nextValue` (read
+afterwards, under the queue lock; a counter past it means the semaphore was signalled from
+outside and is fatal), skips claimed contexts, wins the claim by CAS on the rest, and for each
+completed one settles the bytes and moves the list out before dropping the claim. Releases run
+only after that, from a local list, with no lock held.
 
 Every batch of releases is registered on the device for as long as it runs, as `{pool, thread,
 id}`, whichever reaper runs it; `acquire` registers from the moment it wins the claim, because
@@ -109,9 +113,10 @@ reach the total. The budget is a quarter of the VRAM limit, refreshed by `setMax
 disables the gate.
 
 What each typed retention counts: a GPU-resident frame its whole size, a host frame nothing, a
-pooled buffer or region its region size, a user object whatever the caller passed. The
-allocator's blocks are accounted separately through `accountAllocation` into `MemoryUse`;
-transfer staging buffers are not accounted anywhere.
+pooled buffer or region its region size, a user object whatever the caller passed. A pool that
+does not signal progress meters nothing (I21): its retentions are kept and released as usual
+but never enter the total. The allocator's blocks are accounted separately through
+`accountAllocation` into `MemoryUse`; transfer staging buffers are not accounted anywhere.
 
 ## 6. Admission gate
 
@@ -121,7 +126,9 @@ budget, wait for `counter + 1` with a 50 ms timeout, repeat. The counter is samp
 sweep so a completion between the two either gets reaped or leaves the counter behind the wait
 target. Only submitted work is counted, so a thread's own recordings never gate it. Compute-queue
 pools signal the progress timeline on every submission; a pool on a dedicated transfer queue
-does not, which is what the timeout covers, and such pools retain nothing today.
+does not, and its retentions are not metered. The timeout remains for the one event that
+reduces the total without a signal: a completed context an acquirer claimed first settles its
+bytes on the host. A host-signalled wake-up (P10) would retire it.
 
 ## 7. Allocation ladder
 
@@ -173,30 +180,33 @@ rung 1 waits.
 | I16 | One context per pool per thread. | the owner thread recorded on the claim; `failIfHoldingContext` in `acquire` |
 | I17 | Retain, submit and abandon only by the claim holder's thread. | `failUnlessOwner` |
 | I18 | `waitAll` (idle wait and destruction) only from a thread holding no context of the pool. | `failIfHoldingContext` in `waitAll` |
+| I19 | A pool is never destroyed while any thread holds one of its contexts. | `failIfAnyContextHeld` in the destructor, after unregistration, when a claim can only mean a thread still using the pool |
+| I20 | The pool's timeline advances only through the pool's own submissions: its counter never exceeds `nextValue`. | the check in `detachCompleted`, counter read first and `nextValue` after it under the queue lock |
+| I21 | Every metered byte belongs to a submission whose completion signals the progress timeline. | `retain` adds bytes only on a pool with `signalsProgress` |
 
 ## 10. Known windows and their bounds
 
 | # | Window | Consequence | Bound |
 |---|---|---|---|
 | W1 | Bytes leave the total at detach, the region returns at the callback. | a gate-admitted thread can fail at the driver | rung 1 waits for the release and retries |
-| W3 | A pool on a dedicated transfer queue never signals progress. | a gate blocked on its bytes wakes only by timeout | 50 ms; moot while such pools retain nothing |
+| W6 | A completed context claimed by an acquirer settles its bytes on the host, with no signal to the gate. | a gated thread wakes only at the next completion or the poll | 50 ms |
 
 W2, W4 and W5 of the earlier revision are gone with I15 and I18: a batch can no longer wait on
 anything, so the ladder's wait is unbounded, and a caller cannot wait a pool idle around its
-own recording.
+own recording. W3 is gone with I21. W6 is what the gate's poll now exists for.
 
 ## 11. Candidate invariants, not enforced
 
-P1 to P4 of the earlier revision are now I15 to I18. Each of the rest would delete a further
+P1 to P4 of the earlier revision are now I15 to I18, P6 and P9 are I19 and I20, and P5 is I21
+(as "not metered" rather than fatal, since the typed calls count bytes on their own and a
+transfer pool that copies GPU frames has to read them). Each of the rest would delete a further
 class of interleavings from what must be reasoned about, and each is cheap.
 
 | # | Candidate | Enforce by | Eliminates |
 |---|---|---|---|
-| P5 | Only progress-signalling pools may retain bytes. | fatal on `bytes > 0` for a pool that does not signal progress | W3, and with it the gate's 50 ms timeout: it can wait on the semaphore alone |
-| P6 | A pool is never destroyed with a claimed context. | fatal in the destructor if any context is claimed | undefined behaviour in the destructor's release loop; today it is only documented |
 | P7 | Per-pool byte identity. | keep a per-pool counted sum; assert zero at pool destruction and a zero device total at device destruction, in a self-check mode beside `VS_VULKAN_VALIDATION` | accounting drift going unnoticed until the gate stalls |
 | P8 | No lock held during callbacks, checked rather than argued. | debug wrappers on `cacheLock` and `execPoolsMutex` that record the owner; `runReleases` asserts the current thread owns neither | regressions of I7 by a future caller |
-| P9 | `pendingValue` never exceeds the pool's `nextValue` and increases on every submit of a context. | assert in `submit` | timeline misuse from outside, which the header forbids but nothing checks |
+| P10 | Every event that reduces the byte total wakes the gate. | a second timeline that only the host signals, once per settle; the gate waits on it and the progress timeline with `VK_SEMAPHORE_WAIT_ANY_BIT` | W6, and with it the gate's 50 ms poll, which can then go entirely |
 
 With I15 to I18 in place callbacks are pure frees and every rendezvous is unambiguous, which
 is the shape a single-reaper design would enforce structurally; that later change, if wanted,

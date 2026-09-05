@@ -615,8 +615,9 @@ struct VSVULKANAPI {
 
     /* Creates an exec pool on one of the core's queues. A pool on vqTransfer may only ever
        record copies, per VSVulkanQueueType, and does not drive the core's progress timeline, so
-       the in-flight budget below falls back to polling for it; a pool anything is dispatched
-       into belongs on vqCompute.
+       what it retains is kept alive and released as usual but does not count against the
+       in-flight budget below, which only meters work whose completion can wake a gated
+       thread; a pool anything is dispatched into belongs on vqCompute.
 
        The core sizes the pool's context
        ring itself, from its worker thread count (two to eight contexts) — how many
@@ -630,7 +631,8 @@ struct VSVULKANAPI {
        device can, so consumers in other APIs can wait the producer pairs it publishes.
        Destroy it in the filter's free callback; freeGPUExecPool drains the GPU first, so
        everything it still holds is released safely, and it returns only once every release
-       callback the pool registered has run, so instance data can go right after it.
+       callback the pool registered has run, so instance data can go right after it. A
+       context still held by any thread at that point is fatal.
 
        Retained objects (read frames, scratch handed over with gpuExecUsesBuffer) are
        released once their submission is known complete: every submit on the pool reaps the
@@ -662,7 +664,9 @@ struct VSVULKANAPI {
        reference, so publishing it needs no reference of yours; getGPUTimelineSemaphore
        gives the raw handle when exportGPUSemaphore needs one. NEVER signal that handle
        yourself: the pool allocates signal values under the queue lock at submit, and an
-       external signal races them on a timeline where values must only increase. */
+       external signal races them on a timeline where values must only increase. The pool
+       compares the counter with the last value it submitted whenever it reaps, and a counter
+       past it is fatal. */
     VSGPUTimeline *(VS_CC *gpuExecPoolTimeline)(VSGPUExecPool *pool) VS_NOEXCEPT;
 
     /* ---- Recording contexts ---- */

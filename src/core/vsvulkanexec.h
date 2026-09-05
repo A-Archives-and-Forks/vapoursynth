@@ -208,14 +208,17 @@ private:
     void failUnlessOwner(const VSVulkanExecContext &context, const char *what) const;
     /* Fatal when the calling thread holds a claim on any context of this pool. */
     void failIfHoldingContext(const char *what) const;
+    /* Fatal when any thread holds a claim on any context of this pool. */
+    void failIfAnyContextHeld(const char *what) const;
 
     VSVulkanDevice *dev = nullptr;
     VSVulkanQueue *q = nullptr;
     VSVulkanTimeline *timeline = nullptr;
     uint64_t nextValue = 0; /* guarded by the queue lock */
     /* Compute queue pools additionally signal the device's progress timeline on every
-       submission, which is what the admission gate sleeps on; pools on other queues wake it
-       only through its timeout, and today pass no bytes anyway. */
+       submission, which is what the admission gate sleeps on. A pool on another queue cannot
+       wake it, so what it retains is kept alive and released as usual but never counted:
+       every metered byte belongs to a submission whose completion can wake the gate. */
     bool signalsProgress = false;
     std::vector<std::unique_ptr<VSVulkanExecContext>> contexts;
     std::atomic<uint32_t> cursor{0};

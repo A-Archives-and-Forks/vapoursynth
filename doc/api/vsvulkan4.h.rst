@@ -1010,8 +1010,10 @@ VSGPUExecPool_ \*createGPUExecPool(VSCore \*core, int queue, char \*errorMessage
    Creates an exec pool on one of the core's queues (VSVulkanQueueType_).
 
    A pool on *vqTransfer* may only ever record copies, and does not drive the
-   core's progress timeline, so the in-flight budget below falls back to polling
-   for it. A pool anything is dispatched into belongs on *vqCompute*.
+   core's progress timeline, so what it retains is kept alive and released as
+   usual but does not count against the in-flight budget below, which only
+   meters work whose completion can wake a gated thread. A pool anything is
+   dispatched into belongs on *vqCompute*.
 
    The core sizes the pool's context ring itself, from its worker thread
    count (two to eight contexts) — how many recordings can even be concurrent
@@ -1028,7 +1030,8 @@ VSGPUExecPool_ \*createGPUExecPool(VSCore \*core, int queue, char \*errorMessage
    publishes.
 
    Destroy it in the filter's free callback; freeGPUExecPool_ drains the GPU
-   first, so everything it still holds is released safely.
+   first, so everything it still holds is released safely. A context still
+   held by any thread at that point is fatal.
 
    Retained objects — frames from gpuExecReadsFrame_, scratch from
    gpuExecUsesBuffer_ and gpuExecUsesMemory_, anything from gpuExecRetain_ —
@@ -1084,7 +1087,8 @@ VSGPUTimeline_ \*gpuExecPoolTimeline(VSGPUExecPool_ \*pool)
 
    Never signal that handle yourself: the pool allocates signal values under
    the queue lock at submit, and an external signal races them on a timeline
-   where values must only increase.
+   where values must only increase. The pool compares the counter with the
+   last value it submitted whenever it reaps, and a counter past it is fatal.
 
 ----------
 

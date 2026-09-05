@@ -1299,8 +1299,11 @@ void VSVulkanDevice::execAdmissionGate() {
             return;
         if (!canWait)
             return; /* no wakeup available: running past the budget beats spinning */
-        /* Sleep until any compute submission completes. The bound is not decorative: bytes
-           can be pinned by pools on other queues, which never signal this semaphore. */
+        /* Sleep until any compute submission completes. The bound is not decorative: a
+           completed context that an acquirer claimed first settles its bytes on the host,
+           and nothing signals this semaphore for that, so the poll is what covers it until
+           there is a host-signalled wake-up. Every counted byte does belong to a submission
+           whose completion signals here, since pools on other queues are not metered. */
         const uint64_t target = counter + 1;
         VkSemaphoreWaitInfo waitInfo = {};
         waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;

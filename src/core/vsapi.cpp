@@ -1572,6 +1572,7 @@ static VSGPUExecPool *VS_CC vkCreateGPUExecPool(VSCore *core, int queue,
     /* Same late destroy safety net frames and buffers have. */
     pool->device = dev;
     dev->addRef();
+    pool->pool.bindHandles(pool.get());
     return pool.release();
 }
 
@@ -1591,19 +1592,30 @@ static VSGPUExecContext *VS_CC vkGPUExecAcquire(VSGPUExecPool *pool, char *error
         copyVulkanError(err, errorMessage, errorMessageSize);
         return nullptr;
     }
-    auto ctx = std::make_unique<VSGPUExecContext>();
-    ctx->owner = pool;
-    ctx->context = inner;
-    return ctx.release();
+    /* The handle lives in the slot; its lists are reset here, under the claim, so nothing of
+       the previous recording leaks into this one. */
+    VSGPUExecContext *ctx = &inner->handle;
+    ctx->reset();
+    return ctx;
+}
+
+/* Every entry point taking a handle starts here. The handle is a slot of the pool for the
+   pool's whole life, so a stale one -- used after the submit or abandon that ended its
+   recording -- is caught by the claim it no longer holds rather than read out of freed
+   memory, and before any of its lists is touched. */
+static void checkExecHandle(const VSGPUExecContext *context, const char *what) {
+    assert(context);
+    context->owner->pool.failUnlessOwner(*context->context, what);
 }
 
 static VkCommandBuffer VS_CC vkGPUExecCommandBuffer(VSGPUExecContext *context) VS_NOEXCEPT {
-    assert(context);
+    checkExecHandle(context, "gpuExecCommandBuffer");
     return context->context->commandBuffer();
 }
 
 static void VS_CC vkGPUExecReadsFrame(VSGPUExecContext *context, const VSFrame *frame) VS_NOEXCEPT {
-    assert(context && frame);
+    assert(frame);
+    checkExecHandle(context, "gpuExecReadsFrame");
     const VSVideoFormat *fmt = frame->getVideoFormat();
     for (int p = 0; fmt && p < fmt->numPlanes; p++) {
         const VSVulkanPlane *plane = frame->getGPUPlane(p);
@@ -1619,18 +1631,19 @@ static void VS_CC vkGPUExecReadsFrame(VSGPUExecContext *context, const VSFrame *
 }
 
 static void VS_CC vkGPUExecWritesPlane(VSGPUExecContext *context, VSFrame *frame, int plane) VS_NOEXCEPT {
-    assert(context && frame);
+    assert(frame);
+    checkExecHandle(context, "gpuExecWritesPlane");
     context->publish.push_back({ frame, plane });
 }
 
 static void VS_CC vkGPUExecUsesBuffer(VSGPUExecContext *context, VSGPUBuffer *buffer) VS_NOEXCEPT {
-    assert(context);
+    checkExecHandle(context, "gpuExecUsesBuffer");
     if (buffer)
         context->owner->pool.retain(*context->context, releaseRetainedBuffer, buffer, buffer->buffer.poolSize);
 }
 
 static void VS_CC vkGPUExecUsesMemory(VSGPUExecContext *context, VSGPUMemory *memory) VS_NOEXCEPT {
-    assert(context);
+    checkExecHandle(context, "gpuExecUsesMemory");
     if (memory)
         context->owner->pool.retain(*context->context, releaseRetainedMemory, memory, memory->region.size);
 }
@@ -1639,7 +1652,8 @@ static void VS_CC vkGPUExecUsesMemory(VSGPUExecContext *context, VSGPUMemory *me
    type, so nothing is wrapped and nothing is allocated to carry it. */
 static void VS_CC vkGPUExecRetain(VSGPUExecContext *context, VSGPUReleaseFunc release,
     void *object, VkDeviceSize bytes) VS_NOEXCEPT {
-    assert(context && release);
+    assert(release);
+    checkExecHandle(context, "gpuExecRetain");
     if (release)
         context->owner->pool.retain(*context->context, release, object, bytes);
 }
@@ -1691,17 +1705,21 @@ static void VS_CC vkReleaseGPUMemoryReservation(VSGPUMemoryReservation *reservat
 }
 
 static int VS_CC vkGPUExecSubmit(VSGPUExecContext *context, uint64_t *signaledValue, char *errorMessage, int errorMessageSize) VS_NOEXCEPT {
-    assert(context);
-    std::unique_ptr<VSGPUExecContext> owned(context); /* consumed either way */
+    checkExecHandle(context, "gpuExecSubmit");
+    /* Moved out while the claim is still held: submit drops the claim, and from then on the
+       slot, its handle included, belongs to whoever acquires it next. */
+    VSVulkanWaitList waits = std::move(context->waits);
+    std::vector<VSGPUExecContext::PublishTarget> publish = std::move(context->publish);
+    context->reset();
     std::string err;
     uint64_t value = 0;
-    if (!context->owner->pool.submit(*context->context, err, &value, context->waits.data(), context->waits.size())) {
+    if (!context->owner->pool.submit(*context->context, err, &value, waits.data(), waits.size())) {
         copyVulkanError(err, errorMessage, errorMessageSize);
         return 1;
     }
     if (signaledValue)
         *signaledValue = value;
-    for (const auto &target : context->publish) {
+    for (const auto &target : publish) {
         VSVulkanPlane *plane = target.frame->getGPUPlane(target.plane);
         if (plane)
             setPlaneProducer(*plane, context->owner->pool.timelineObject(), value);
@@ -1712,7 +1730,8 @@ static int VS_CC vkGPUExecSubmit(VSGPUExecContext *context, uint64_t *signaledVa
 static void VS_CC vkGPUExecAbandon(VSGPUExecContext *context) VS_NOEXCEPT {
     if (!context)
         return;
-    std::unique_ptr<VSGPUExecContext> owned(context);
+    checkExecHandle(context, "gpuExecAbandon");
+    context->reset();
     context->owner->pool.abandon(*context->context);
 }
 

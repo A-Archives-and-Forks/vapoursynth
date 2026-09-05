@@ -69,6 +69,14 @@ struct VSVulkanPlane {
 /* addRef before release so republishing the same timeline onto a plane -- the ordinary case for
    a filter writing a plane twice -- cannot drop the last reference in between. */
 inline void setPlaneProducer(VSVulkanPlane &plane, VSVulkanTimeline *timeline, uint64_t value) {
+    /* A pair on a pool's timeline past what the pool submitted would be waited for by every
+       consumer, by waitGPUFrame and by the plane's own destruction, and never reached; the
+       header promises it is fatal instead (invariant I23). The pool records each value under
+       its queue lock before anyone can learn it, so a value obtained legitimately -- the
+       signaledValue of a submit, or a plane's published pair -- always passes. Timelines a
+       filter signals itself carry no bound. */
+    if (timeline && timeline->isPoolOwned() && value > timeline->lastSubmitted())
+        vulkanFatal("setGPUPlaneProducer published a value on an exec pool's timeline that the pool has not submitted");
     if (timeline)
         timeline->addRef();
     if (plane.readyTimeline)

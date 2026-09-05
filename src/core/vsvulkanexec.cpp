@@ -48,9 +48,21 @@ VSVulkanExecPool::~VSVulkanExecPool() {
 }
 
 void VSVulkanExecPool::failUnlessOwner(const VSVulkanExecContext &context, const char *what) const {
-    if (context.owner.load(std::memory_order_acquire) != std::this_thread::get_id()) {
-        std::string message = std::string(what) + " called by a thread that did not acquire the context";
-        vulkanFatal(message.c_str());
+    const std::thread::id holder = context.owner.load(std::memory_order_acquire);
+    if (holder == std::this_thread::get_id())
+        return;
+    /* An empty owner is a handle whose recording already ended: the slot is idle, pending on
+       the GPU, or transiently claimed by a reaper, none of which this caller holds. */
+    std::string message = std::string(what) + (holder == std::thread::id()
+        ? " called with a context handle whose recording was already ended by gpuExecSubmit or gpuExecAbandon"
+        : " called by a thread that did not acquire the context");
+    vulkanFatal(message.c_str());
+}
+
+void VSVulkanExecPool::bindHandles(VSGPUExecPool *owner) {
+    for (auto &context : contexts) {
+        context->handle.owner = owner;
+        context->handle.context = context.get();
     }
 }
 
@@ -139,7 +151,7 @@ bool VSVulkanExecPool::init(VSVulkanDevice &device, VSVulkanQueue &queue, uint32
 
     /* This timeline becomes the producer pair of every frame the pool writes, so it is counted
        and may well outlive the pool; see VSVulkanTimeline. */
-    timeline = VSVulkanTimeline::create(*dev, errorMessage);
+    timeline = VSVulkanTimeline::create(*dev, errorMessage, true);
     if (!timeline)
         return false;
 
@@ -399,6 +411,9 @@ bool VSVulkanExecPool::submit(VSVulkanExecContext &context, std::string &errorMe
         if (res == VK_SUCCESS) {
             nextValue++;
             context.pendingValue = nextValue;
+            /* Recorded before the caller can learn the value, so a producer pair built from
+               it always passes the bound setPlaneProducer checks. */
+            timeline->noteSubmitted(nextValue);
             if (signalsProgress)
                 dev->execProgressNext++;
             if (signaledValue)

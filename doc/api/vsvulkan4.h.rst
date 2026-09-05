@@ -772,7 +772,9 @@ void setGPUPlaneProducer(VSFrame \*frame, int plane, VSGPUTimeline_ \*timeline, 
    The plane takes its own reference on the timeline, so publishing needs no
    reference of yours to be kept afterwards, and you may release yours as
    soon as you are done signalling. Passing NULL publishes the plane as host
-   ready. Only ever call this on frames you are producing.
+   ready. Only ever call this on frames you are producing. On an exec pool's
+   timeline *value* must be one the pool has submitted, the *signaledValue*
+   of a gpuExecSubmit_ call; a larger value is fatal.
 
 ----------
 
@@ -1089,6 +1091,9 @@ VSGPUTimeline_ \*gpuExecPoolTimeline(VSGPUExecPool_ \*pool)
    the queue lock at submit, and an external signal races them on a timeline
    where values must only increase. The pool compares the counter with the
    last value it submitted whenever it reaps, and a counter past it is fatal.
+   Publish only values it has submitted: setGPUPlaneProducer_ with this
+   timeline and a value past the newest gpuExecSubmit_ is fatal too, since no
+   consumer could ever be released from waiting on it.
 
 ----------
 
@@ -1102,7 +1107,8 @@ VSGPUExecContext_ \*gpuExecAcquire(VSGPUExecPool_ \*pool, char \*errorMessage, i
    finishes or the in-flight retention budget frees up.
 
    Every acquire ends on the thread that made it: retaining, submitting or
-   abandoning from any other thread is fatal. One context of a pool per
+   abandoning from any other thread is fatal, and so is any call with the
+   handle after the submit or abandon that ended it. One context of a pool per
    thread: the ring has only two to eight contexts, so a second acquire from a
    thread already holding one could only wait for a slot that, once every
    worker did the same, nobody would ever release, and it is fatal instead.
@@ -1210,7 +1216,8 @@ int gpuExecSubmit(VSGPUExecContext_ \*context, uint64_t \*signaledValue, char \*
 
    Ends recording and submits, allocating the timeline value inside the queue
    lock so signals reach the queue in increasing order, then publishes the
-   producer pairs. The context is consumed either way, success or failure.
+   producer pairs. The context is consumed either way, success or failure,
+   and the handle is dead from then on: using it again is fatal.
 
    *signaledValue*, when non-NULL, receives the value this submission signals
    on the pool's timeline. Waiting for it — vkWaitSemaphores on

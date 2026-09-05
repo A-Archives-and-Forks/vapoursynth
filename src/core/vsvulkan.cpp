@@ -1516,7 +1516,7 @@ bool VSVulkanDevice::enumerateDevices(std::vector<VSVulkanDeviceInfo> &devices, 
 
 /* The one place a producer timeline is made, so the export opt-in and the value semantics are
    decided once for core exec pools and third party filters alike. */
-VSVulkanTimeline *VSVulkanTimeline::create(VSVulkanDevice &device, std::string &errorMessage) {
+VSVulkanTimeline *VSVulkanTimeline::create(VSVulkanDevice &device, std::string &errorMessage, bool poolOwned) {
     VkExportSemaphoreCreateInfo exportInfo = {};
     exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
     exportInfo.handleTypes = device.semaphoreExportHandleType();
@@ -1535,7 +1535,7 @@ VSVulkanTimeline *VSVulkanTimeline::create(VSVulkanDevice &device, std::string &
         errorMessage = "vkCreateSemaphore failed for a producer timeline (VkResult " + std::to_string(res) + ")";
         return nullptr;
     }
-    return new VSVulkanTimeline(device, semaphore);
+    return new VSVulkanTimeline(device, semaphore, poolOwned);
 }
 
 /* Semaphore before device, like VSPlaneData destroys its buffer before releasing the device:

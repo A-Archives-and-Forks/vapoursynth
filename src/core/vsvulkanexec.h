@@ -73,6 +73,7 @@ public:
 
     const VSVulkanWait *data() const { return waits.data(); }
     uint32_t size() const { return static_cast<uint32_t>(waits.size()); }
+    void clear() { waits.clear(); }
 
 private:
     std::vector<VSVulkanWait> waits;
@@ -81,6 +82,35 @@ private:
 struct VSVulkanExecRetained {
     VSGPUReleaseFunc release;
     void *object;
+};
+
+struct VSGPUExecPool;
+class VSVulkanExecContext;
+
+/* The public VSGPUExecContext: a claimed recording plus what the filter declared about it.
+   Waits and publications are collected during recording and applied at submit, which is
+   what lets a filter state its dependencies in any order while the pool still gets one
+   deduplicated wait list and one producer value.
+
+   One lives inside each ring slot rather than being allocated per acquire, so the handle a
+   filter holds stays a valid object for the life of the pool: a handle used after the submit
+   or abandon that ended it names a slot nobody holds, or one held by someone else, and every
+   entry point checks that before touching anything (invariant I22). The two pointers are
+   bound once at pool creation; the lists belong to whoever holds the claim. */
+struct VSGPUExecContext {
+    VSGPUExecPool *owner = nullptr;
+    VSVulkanExecContext *context = nullptr;
+    VSVulkanWaitList waits;
+    struct PublishTarget {
+        VSFrame *frame;
+        int plane;
+    };
+    std::vector<PublishTarget> publish;
+
+    void reset() {
+        waits.clear();
+        publish.clear();
+    }
 };
 
 /* One recording and submission slot: a command pool holding a single primary command buffer,
@@ -97,6 +127,9 @@ public:
 
     /* Valid for recording between acquire() and submit(). */
     VkCommandBuffer commandBuffer() const { return cmd; }
+
+    /* The public handle for this slot, bound once by bindHandles; see VSGPUExecContext. */
+    VSGPUExecContext handle;
 
 private:
     VkCommandPool commandPool = VK_NULL_HANDLE;
@@ -194,6 +227,15 @@ public:
     VSVulkanTimeline *timelineObject() const { return timeline; }
     VSVulkanQueue *queue() const { return q; }
 
+    /* Points every slot's public handle at its slot and at the public pool, once, before any
+       thread can see a handle. */
+    void bindHandles(VSGPUExecPool *owner);
+    /* Fatal unless the calling thread is the one holding the context's claim. The public
+       entry points check their handle through this before touching anything, which is what
+       makes a handle used after its submit or abandon a named error rather than a read of
+       freed memory (invariant I22). */
+    void failUnlessOwner(const VSVulkanExecContext &context, const char *what) const;
+
     /* The public exec pool handle wraps one of these plus the device reference that keeps
        the allocator reachable for a late free, mirroring VSGPUBuffer. */
     friend struct VSGPUExecPool;
@@ -204,8 +246,6 @@ private:
     void releaseRetained(VSVulkanExecContext &context);
     /* releaseRetained without the batch registration, for a caller that registered earlier. */
     void releaseRetainedNow(VSVulkanExecContext &context);
-    /* Fatal unless the calling thread is the one holding the context's claim. */
-    void failUnlessOwner(const VSVulkanExecContext &context, const char *what) const;
     /* Fatal when the calling thread holds a claim on any context of this pool. */
     void failIfHoldingContext(const char *what) const;
     /* Fatal when any thread holds a claim on any context of this pool. */
@@ -231,21 +271,6 @@ private:
 struct VSGPUExecPool {
     VSVulkanExecPool pool;
     VSVulkanDevice *device = nullptr;
-};
-
-/* The public VSGPUExecContext: a claimed recording plus what the filter declared about it.
-   Waits and publications are collected during recording and applied at submit, which is
-   what lets a filter state its dependencies in any order while the pool still gets one
-   deduplicated wait list and one producer value. */
-struct VSGPUExecContext {
-    VSGPUExecPool *owner = nullptr;
-    VSVulkanExecContext *context = nullptr;
-    VSVulkanWaitList waits;
-    struct PublishTarget {
-        VSFrame *frame;
-        int plane;
-    };
-    std::vector<PublishTarget> publish;
 };
 
 #endif

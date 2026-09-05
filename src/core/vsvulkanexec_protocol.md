@@ -8,7 +8,7 @@ every change must keep. The public contract it describes is the one in `VSVulkan
 two disagree, the header is what plugins were promised and this file is what needs fixing.
 
 Verified against the tree of 2026-09-05 (the release-batch registry with sequence numbers and
-the enforced rules I15 to I21). Section 11 lists invariants that are *not* enforced yet and
+the enforced rules I15 to I23). Section 11 lists invariants that are *not* enforced yet and
 what each would rule out.
 
 ## 1. Objects and ownership
@@ -20,7 +20,7 @@ what each would rule out.
 | `VSVulkanExecContext` | its pool | a command pool with one primary buffer, the `claimed` flag, `pendingValue`, the retention list, `retainedBytes`, `retainedCounted` |
 | retention | the context it was registered on, until reaped | a release function and an object; bytes are summed on the context |
 | release batch | the device registry | pool, running thread, sequence number |
-| `VSGPUExecContext` | the caller, from `gpuExecAcquire` to `gpuExecSubmit`/`gpuExecAbandon` | the claimed context, the deduplicated wait list, the planes to publish |
+| `VSGPUExecContext` | its ring slot, for the life of the pool; usable by the caller from `gpuExecAcquire` to the `gpuExecSubmit`/`gpuExecAbandon` that ends it | the slot, the deduplicated wait list, the planes to publish |
 
 A public pool's ring has `clamp(workerThreads, 2, 8)` contexts, fixed at creation. The transfer's
 pool has one context per staging slot and never retains anything.
@@ -59,11 +59,14 @@ fresh ──acquire──▶ recording ──submit ok──▶ pending ──GP
   Then reset the command pool and begin the buffer. Every failure path drops the claim.
 - **recording**: `retain` appends to the context's list and adds to `retainedBytes`; nothing
   reaches the device yet. Only the claim holder may call it.
-- **submit** (`submit`): end the buffer (failure releases retentions and claim); deduplicate the
-  waits; under the queue lock allocate the next timeline value and, for compute-queue pools,
-  the next progress value, and submit. On success add `retainedBytes` to the device total and
-  set `retainedCounted`, still under the claim; on failure release the retentions (uncounted).
-  Drop the claim, then reap the pool's other completed contexts (`sweepCompleted`).
+- **submit** (`submit`): the public wrapper first moves the wait list and the publish list out
+  of the slot's handle, while the claim is still held. Then end the buffer (failure releases
+  retentions and claim); under the queue lock allocate the next timeline value and, for
+  compute-queue pools, the next progress value, submit, and record the value on the timeline
+  object (`noteSubmitted`). On success add `retainedBytes` to the device total and set
+  `retainedCounted`, still under the claim; on failure release the retentions (uncounted).
+  Drop the claim, then reap the pool's other completed contexts (`sweepCompleted`). The
+  wrapper publishes the producer pairs from its local list afterwards.
 - **abandon**: release the retentions (uncounted) and drop the claim.
 - **completed**: a context nobody holds whose `pendingValue` the timeline has reached. Any
   reaper may claim it by CAS and detach its retentions.
@@ -146,6 +149,8 @@ rung 1 waits.
 
 - Every acquire ends in exactly one submit or abandon, by the thread that acquired; retain,
   submit and abandon from any other thread are fatal.
+- A context handle is dead after the submit or abandon that ended it; any call with it
+  afterwards is fatal.
 - One context of a pool per thread, fatal otherwise; contexts of different pools may be held
   together. The in-flight budget counts submitted work only.
 - Retain only between acquire and submit.
@@ -157,6 +162,8 @@ rung 1 waits.
 - Pools are destroyed in the filter's free callback, with no context claimed; destroying one
   while holding its own context is fatal.
 - Never signal a pool's timeline from outside.
+- A producer pair on a pool's timeline names a value the pool has submitted; a larger value is
+  fatal at publish. Timelines from `createGPUTimeline` carry no such bound.
 
 ## 9. Invariants
 
@@ -183,6 +190,8 @@ rung 1 waits.
 | I19 | A pool is never destroyed while any thread holds one of its contexts. | `failIfAnyContextHeld` in the destructor, after unregistration, when a claim can only mean a thread still using the pool |
 | I20 | The pool's timeline advances only through the pool's own submissions: its counter never exceeds `nextValue`. | the check in `detachCompleted`, counter read first and `nextValue` after it under the queue lock |
 | I21 | Every metered byte belongs to a submission whose completion signals the progress timeline. | `retain` adds bytes only on a pool with `signalsProgress` |
+| I22 | A context handle is usable exactly from its acquire to the submit or abandon that ends it; any later use is fatal, never a read of freed memory. | the handle lives in the ring slot, bound once at creation; every public entry point runs `failUnlessOwner` first, whose empty-owner case names an ended recording; the wrapper moves the handle's lists out before `submit` drops the claim |
+| I23 | A producer pair naming a pool's timeline never carries a value the pool has not submitted. | `noteSubmitted` under the queue lock at submit, before the caller can learn the value; the check in `setPlaneProducer`; timelines from `createGPUTimeline` are not pool-owned and exempt |
 
 ## 10. Known windows and their bounds
 
@@ -197,16 +206,22 @@ own recording. W3 is gone with I21. W6 is what the gate's poll now exists for.
 
 ## 11. Candidate invariants, not enforced
 
-P1 to P4 of the earlier revision are now I15 to I18, P6 and P9 are I19 and I20, and P5 is I21
-(as "not metered" rather than fatal, since the typed calls count bytes on their own and a
-transfer pool that copies GPU frames has to read them). Each of the rest would delete a further
-class of interleavings from what must be reasoned about, and each is cheap.
+P1 to P4 of the earlier revision are now I15 to I18, P6 and P9 are I19 and I20, P5 is I21 (as
+"not metered" rather than fatal, since the typed calls count bytes on their own and a transfer
+pool that copies GPU frames has to read them), and P11 and P12 are I22 and I23. Each of the rest
+would delete a further class of interleavings from what must be reasoned about; P13 is a design
+change, the others are cheap.
 
 | # | Candidate | Enforce by | Eliminates |
 |---|---|---|---|
 | P7 | Per-pool byte identity. | keep a per-pool counted sum; assert zero at pool destruction and a zero device total at device destruction, in a self-check mode beside `VS_VULKAN_VALIDATION` | accounting drift going unnoticed until the gate stalls |
 | P8 | No lock held during callbacks, checked rather than argued. | debug wrappers on `cacheLock` and `execPoolsMutex` that record the owner; `runReleases` asserts the current thread owns neither | regressions of I7 by a future caller |
 | P10 | Every event that reduces the byte total wakes the gate. | a second timeline that only the host signals, once per settle; the gate waits on it and the progress timeline with `VK_SEMAPHORE_WAIT_ANY_BIT` | W6, and with it the gate's 50 ms poll, which can then go entirely |
+| P13 | Freeing a GPU frame never waits on the GPU. | a plane whose producer is still pending hands its buffer to a device-level deferred list keyed by the pair, reaped by the existing sweeps and at teardown, instead of the wait in `~VSPlaneData` | the eviction stall under `cacheLock` on a just-produced frame, and the deadlock where that work depends on a host signal from a thread blocked on `cacheLock` |
+| P14 | A thread waiting for a claim on one pool holds no context of a pool created after it. | on acquire's slow path only, walk the registry for contexts owned by this thread and fail on a later pool; or size the ring to the worker count so workers never wait | cross-pool circular waits when rings are full |
+| P15 | A producer is published only on a plane whose plane data is unique. | fatal in both publication paths when `VSPlaneData::unique()` is false | a filter writing into a copied GPU frame, which shares plane data and corrupts the original silently |
+| P16 | After device loss every wait returns an error, every retention is still released once, and destruction completes. | nothing in code; a probe that forces a driver timeout with an infinite shader loop, then exercises acquire, `waitAll` and free | the unverified assumption behind every unbounded wait |
+| P17 | When the core is freed, no live frame names a pending producer. | stop skipping the producer wait in `~VSPlaneData` once the core is gone, or record why the skip is safe | a buffer destroyed under a foreign API's pending access after teardown |
 
 With I15 to I18 in place callbacks are pure frees and every rendezvous is unambiguous, which
 is the shape a single-reaper design would enforce structurally; that later change, if wanted,

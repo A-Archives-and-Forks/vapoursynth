@@ -678,10 +678,18 @@ private:
 struct VSVulkanTimeline {
 public:
     /* Exportable whenever the device can, since a producer pair a foreign API can wait on
-       device side beats one that forces a host stall. Returns null with the error set. */
-    static VSVulkanTimeline *create(VSVulkanDevice &device, std::string &errorMessage);
+       device side beats one that forces a host stall. Returns null with the error set.
+       poolOwned marks an exec pool's timeline, whose values only its submits may publish. */
+    static VSVulkanTimeline *create(VSVulkanDevice &device, std::string &errorMessage, bool poolOwned = false);
 
     VkSemaphore semaphore() const { return sem; }
+
+    /* For a pool's timeline, the newest value the pool submitted, recorded under its queue
+       lock; a producer pair naming the timeline may not exceed it (invariant I23). A timeline
+       a filter signals itself has no such bound. */
+    bool isPoolOwned() const { return poolOwned; }
+    uint64_t lastSubmitted() const { return submitted.load(std::memory_order_acquire); }
+    void noteSubmitted(uint64_t value) { submitted.store(value, std::memory_order_release); }
 
     void addRef() {
         refs.fetch_add(1, std::memory_order_relaxed);
@@ -692,7 +700,7 @@ public:
     }
 
 private:
-    VSVulkanTimeline(VSVulkanDevice &device, VkSemaphore semaphore) : dev(&device), sem(semaphore) {
+    VSVulkanTimeline(VSVulkanDevice &device, VkSemaphore semaphore, bool poolOwned) : dev(&device), sem(semaphore), poolOwned(poolOwned) {
         dev->addRef();
     }
     ~VSVulkanTimeline();
@@ -701,6 +709,8 @@ private:
 
     VSVulkanDevice *dev;
     VkSemaphore sem;
+    const bool poolOwned;
+    std::atomic<uint64_t> submitted{0};
     std::atomic<long> refs{1};
 };
 

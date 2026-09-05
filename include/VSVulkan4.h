@@ -666,14 +666,17 @@ struct VSVULKANAPI {
        yourself: the pool allocates signal values under the queue lock at submit, and an
        external signal races them on a timeline where values must only increase. The pool
        compares the counter with the last value it submitted whenever it reaps, and a counter
-       past it is fatal. */
+       past it is fatal. Publish only values it has submitted: setGPUPlaneProducer with this
+       timeline and a value past the newest gpuExecSubmit is fatal too, since no consumer
+       could ever be released from waiting on it. */
     VSGPUTimeline *(VS_CC *gpuExecPoolTimeline)(VSGPUExecPool *pool) VS_NOEXCEPT;
 
     /* ---- Recording contexts ---- */
 
     /* Claims a context and begins recording; returns NULL with the error set on device
        loss. Every acquire must end in exactly one submit or abandon, from the thread that
-       acquired; retaining, submitting or abandoning from any other thread is fatal. One
+       acquired; retaining, submitting or abandoning from any other thread is fatal, and so
+       is any call with the handle after the submit or abandon that ended it. One
        context of a pool per thread: the ring has only two to eight contexts, so a second
        acquire from a thread already holding one could only wait for a slot that, once every
        worker did the same, nobody would ever release, and it is fatal instead. Holding
@@ -734,7 +737,8 @@ struct VSVULKANAPI {
 
     /* Ends recording and submits, allocating the timeline value inside the queue lock so
        signals reach the queue in increasing order, then publishes the producer pairs. The
-       context is consumed either way. Returns nonzero with the error set on failure.
+       context is consumed either way, and the handle is dead from then on: using it again
+       is fatal. Returns nonzero with the error set on failure.
 
        signaledValue, when non-NULL, receives the value this submission signals on the
        pool's timeline. Waiting for it — vkWaitSemaphores on

@@ -1064,7 +1064,9 @@ int gpuExecPoolWaitIdle(VSGPUExecPool_ \*pool, char \*errorMessage, int errorMes
    callback of the pool has run — on this thread, or on the thread of a
    concurrent core sweep that reached it first, which is waited for;
    recordings other threads hold at the time are not submissions yet and are
-   left alone.
+   left alone. Call it from a thread holding no context of the pool: holding
+   one is fatal, since that recording could never be covered and every worker
+   doing the same would deadlock.
 
 ----------
 
@@ -1095,11 +1097,14 @@ VSGPUExecContext_ \*gpuExecAcquire(VSGPUExecPool_ \*pool, char \*errorMessage, i
    gpuExecAbandon_. May block briefly while the ring's oldest submission
    finishes or the in-flight retention budget frees up.
 
-   Hold at most one context of a pool per thread: the ring has only two to
-   eight contexts, so a nested acquire on the same pool waits for a slot
-   that, once every worker nests, nobody ever releases. Holding contexts of
-   different pools at once is fine, and the in-flight budget counts submitted
-   work only, so a recording never gates the thread holding it.
+   Every acquire ends on the thread that made it: retaining, submitting or
+   abandoning from any other thread is fatal. One context of a pool per
+   thread: the ring has only two to eight contexts, so a second acquire from a
+   thread already holding one could only wait for a slot that, once every
+   worker did the same, nobody would ever release, and it is fatal instead.
+   Holding contexts of different pools at once is fine, and the in-flight
+   budget counts submitted work only, so a recording never gates the thread
+   holding it.
 
 ----------
 
@@ -1186,13 +1191,12 @@ void gpuExecRetain(VSGPUExecContext_ \*context, VSGPUReleaseFunc_ release, void 
    The callback runs on whichever thread reaps the submission — another
    filter's submit, or a core memory pressure sweep — so it must be safe to
    call from any thread. No core lock is held while it runs, so it may take
-   its own, allocate, create pools and acquire from other pools. It must not
-   free or wait on any exec pool — freeGPUExecPool_ and gpuExecPoolWaitIdle_
-   wait for in-flight releases, so either would wait on itself — and must
-   not acquire from the pool that is reaping it. The reaping thread may be
-   one inside your own getFrame (a gated acquire or a failed allocation
-   sweeps), so do not hold a lock across those calls that the callback also
-   takes.
+   its own locks and free whatever the object owns, and that is all it may
+   do: acquiring a context, allocating GPU memory, and creating, freeing or
+   waiting on a pool from inside a release callback are fatal, stopping the
+   process with a message naming the call. The reaping thread may be one
+   inside your own getFrame (a gated acquire or a failed allocation sweeps),
+   so do not hold a lock across those calls that the callback also takes.
 
 ----------
 

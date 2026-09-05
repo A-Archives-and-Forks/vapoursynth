@@ -33,6 +33,10 @@
 #include <thread>
 #include <vector>
 
+/* Prints the message and terminates: the shape VS_FATAL_ERROR has, for the contract violations
+   this layer detects, without pulling the core header into the Vulkan files. */
+[[noreturn]] void vulkanFatal(const char *message);
+
 /* Owns whatever the entry points were reached through, and the entry points themselves. A device
    object will hold one of these; nothing here knows about instances or devices beyond needing the
    handles passed in, so it can be built and tested on its own. */
@@ -523,21 +527,26 @@ public:
        running it and a sequence number. Unregistering waits until no other thread still
        holds such a batch for the pool, so once it returns every release callback the pool
        registered has run; waitExecReleases is that wait alone, for gpuExecPoolWaitIdle's
-       promise of the same. waitForeignExecReleases waits, for a bounded time, for the
-       batches other threads held when it was called -- not for ones started later, which
-       under load would never let it return -- which is what an allocation that failed at
-       the driver needs before concluding the device is really full.
+       promise of the same. waitForeignExecReleases waits for the batches other threads
+       held when it was called -- not for ones started later, which under load would never
+       let it return -- which is what an allocation that failed at the driver needs before
+       concluding the device is really full.
 
-       The running thread's own batches never count, so a release callback that allocates or
-       acquires elsewhere cannot wait on itself. Freeing or waiting on the pool a batch
-       belongs to from inside that batch is a different thing: the remaining releases would
-       run against a pool that is gone, so it fails fatally instead of returning early. */
+       A release callback may only free. A thread that is running a batch of releases may
+       not acquire a context, allocate GPU memory, or create, free or wait on a pool: every
+       one of those checks the registry for a batch on the calling thread and fails fatally
+       (failIfRunningReleases). That is what makes the waits above safe to leave unbounded --
+       nothing a batch can do waits on another batch, so no cycle exists -- and what keeps a
+       batch's remaining releases from running against a pool that is gone. The running
+       thread's own batches are still left out of every wait, which costs nothing and keeps
+       the waits well defined even where the checks above cannot see a violation. */
     void registerExecPool(VSVulkanExecPool *pool);
     void unregisterExecPool(VSVulkanExecPool *pool);
     void beginExecReleases(VSVulkanExecPool *pool);
     void endExecReleases(VSVulkanExecPool *pool);
     void waitExecReleases(VSVulkanExecPool *pool);
     void waitForeignExecReleases();
+    void failIfRunningReleases(const char *what);
     void sweepExecPools();
 
     /* The in-flight retention budget. Per pool contextCount caps multiply across a graph's
@@ -641,9 +650,9 @@ private:
     /* Lock held. A null pool means any pool; only batches numbered below `before` count, so a
        waiter can name the ones that existed when it started. */
     bool execReleasesPending(const VSVulkanExecPool *pool, uint64_t before) const;
-    /* Lock held. Fails fatally when the calling thread is inside one of the pool's own
-       release batches, which is the contract violation both rendezvous refuse to hide. */
-    void failIfInsideOwnBatch(const VSVulkanExecPool *pool, const char *what) const;
+    /* Lock held. Fails fatally when the calling thread is running a batch of releases,
+       naming the call that a release callback made and may not. */
+    void failIfRunningReleasesLocked(const char *what) const;
     /* Lock held. Removes the given thread's newest batch for the pool; the caller notifies. */
     void endExecReleasesLocked(VSVulkanExecPool *pool, std::thread::id thread);
     std::atomic<uint64_t> execRetainedBytes{0};

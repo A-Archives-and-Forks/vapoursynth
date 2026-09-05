@@ -239,6 +239,9 @@ bool VSVulkanDevice::poolAllowsMixedResourceTypes() const {
 bool VSVulkanDevice::allocatePooled(const VkMemoryRequirements &req, VkMemoryPropertyFlags requiredFlags,
     VkMemoryPropertyFlags preferredFlags, bool exportable, VSVulkanPooledRegion &region,
     std::string &errorMessage) {
+    /* A release callback may only free; an allocation from one is what the ladder below could
+       end up waiting on, so it stops here with a name rather than there without one. */
+    failIfRunningReleases("a GPU allocation");
     uint32_t typeIndex = findMemoryType(req.memoryTypeBits, requiredFlags, preferredFlags);
     if (typeIndex == UINT32_MAX) {
         errorMessage = "No memory type provides the requested properties for this allocation";

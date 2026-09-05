@@ -26,6 +26,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <memory>
+#include <thread>
 #include <vector>
 
 struct VSFrame;
@@ -102,6 +103,10 @@ private:
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     uint64_t pendingValue = 0;
     std::atomic<bool> claimed{false};
+    /* The thread that acquired the context, for as long as it holds the claim; a sweep's
+       transient claim leaves it empty. What the one-context-per-pool-per-thread rule and the
+       "only the acquiring thread may retain, submit or abandon" rule are checked against. */
+    std::atomic<std::thread::id> owner{};
     std::vector<VSVulkanExecRetained> retained;
     /* What the retained objects pin, added to the device's in-flight total when the
        recording is submitted rather than as each object is retained: a recording pins its
@@ -199,6 +204,10 @@ private:
     void releaseRetained(VSVulkanExecContext &context);
     /* releaseRetained without the batch registration, for a caller that registered earlier. */
     void releaseRetainedNow(VSVulkanExecContext &context);
+    /* Fatal unless the calling thread is the one holding the context's claim. */
+    void failUnlessOwner(const VSVulkanExecContext &context, const char *what) const;
+    /* Fatal when the calling thread holds a claim on any context of this pool. */
+    void failIfHoldingContext(const char *what) const;
 
     VSVulkanDevice *dev = nullptr;
     VSVulkanQueue *q = nullptr;

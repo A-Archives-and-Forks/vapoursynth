@@ -1134,7 +1134,13 @@ VkDeviceSize VSVulkanDevice::memoryBudget() const {
 
 void VSVulkanDevice::registerExecPool(VSVulkanExecPool *pool) {
     std::lock_guard<std::mutex> lock(execPoolsMutex);
+    failIfRunningReleasesLocked("createGPUExecPool");
     execPools.push_back(pool);
+}
+
+void vulkanFatal(const char *message) {
+    fprintf(stderr, "VapourSynth encountered a fatal error: %s\n", message);
+    std::terminate();
 }
 
 bool VSVulkanDevice::execReleasesPending(const VSVulkanExecPool *pool, uint64_t before) const {
@@ -1146,22 +1152,24 @@ bool VSVulkanDevice::execReleasesPending(const VSVulkanExecPool *pool, uint64_t 
     return false;
 }
 
-void VSVulkanDevice::failIfInsideOwnBatch(const VSVulkanExecPool *pool, const char *what) const {
+void VSVulkanDevice::failIfRunningReleasesLocked(const char *what) const {
     const std::thread::id me = std::this_thread::get_id();
     for (const ExecReleaseBatch &batch : execReleasesInFlight) {
-        if (batch.pool == pool && batch.thread == me) {
-            /* The same shape as VS_FATAL_ERROR, which lives in the core header this file
-               stays clear of. Returning instead would let the batch's remaining releases
-               run against a pool that no longer exists. */
-            fprintf(stderr, "%s called from a release callback of the exec pool being released\n", what);
-            std::terminate();
+        if (batch.thread == me) {
+            std::string message = std::string(what) + " called from a release callback, which may only free";
+            vulkanFatal(message.c_str());
         }
     }
 }
 
+void VSVulkanDevice::failIfRunningReleases(const char *what) {
+    std::lock_guard<std::mutex> lock(execPoolsMutex);
+    failIfRunningReleasesLocked(what);
+}
+
 void VSVulkanDevice::unregisterExecPool(VSVulkanExecPool *pool) {
     std::unique_lock<std::mutex> lock(execPoolsMutex);
-    failIfInsideOwnBatch(pool, "freeGPUExecPool");
+    failIfRunningReleasesLocked("freeGPUExecPool");
     execPools.erase(std::remove(execPools.begin(), execPools.end(), pool), execPools.end());
     /* Off the list, no sweep can detach anything more; what one already detached is still
        being released on its thread, and the pool's owner is about to free the objects those
@@ -1197,34 +1205,28 @@ void VSVulkanDevice::endExecReleases(VSVulkanExecPool *pool) {
 
 void VSVulkanDevice::waitExecReleases(VSVulkanExecPool *pool) {
     std::unique_lock<std::mutex> lock(execPoolsMutex);
-    failIfInsideOwnBatch(pool, "gpuExecPoolWaitIdle");
     execReleaseCv.wait(lock, [this, pool]() { return !execReleasesPending(pool, UINT64_MAX); });
 }
 
 void VSVulkanDevice::waitForeignExecReleases() {
     /* Only the batches that exist now: these are the ones that can hand back the memory the
        caller just failed to get, while batches started later would keep the wait going under
-       any sustained load. Bounded as well, and short: a release is a free that takes
-       microseconds, and a batch registered by an acquire covers the acquirer waking from its
-       GPU wait, not the GPU work itself, so 100 ms is far past anything that hands memory
-       back. The bound also breaks the two cycles the exclusion of own batches cannot -- two
-       callbacks allocating at the limit waiting on each other, and a batch blocked in acquire
-       on a context the waiting thread holds -- and reaching it just lets the caller proceed
-       to the eviction and the failure it would have reported anyway. */
+       any sustained load. Unbounded, because a batch cannot wait on anything this thread
+       holds: a release callback may only free, and a batch registered by an acquire covers
+       the acquirer's GPU wait, which completes on its own. A release that never returns is a
+       broken plugin, and hangs freeGPUExecPool exactly the same way. */
     std::unique_lock<std::mutex> lock(execPoolsMutex);
     const uint64_t before = nextExecReleaseBatch;
-    execReleaseCv.wait_for(lock, std::chrono::milliseconds(100),
-        [this, before]() { return !execReleasesPending(nullptr, before); });
+    execReleaseCv.wait(lock, [this, before]() { return !execReleasesPending(nullptr, before); });
 }
 
 void VSVulkanDevice::sweepExecPools() {
     /* The registry lock covers the walk only. The releases are collected under it and run
-       once it is dropped: a release callback may create a pool, or acquire from another one
-       whose admission gate sweeps in turn, and both come back to this lock. Every pool that
-       handed something over is registered as a batch in flight until its releases have run,
-       which is what its unregistration waits for; a callback must therefore never free or
-       wait on the pool it is running for, and both fail fatally rather than wait on the very
-       batch running them. */
+       once it is dropped: they are plugin code, which may take its own locks and must never
+       run under a core lock. Every pool that handed something over is registered as a batch
+       in flight until its releases have run, which is what its unregistration waits for; a
+       release callback may only free, and the calls that could wait on a batch -- acquire,
+       allocation, creating, freeing or waiting on a pool -- fail fatally from inside one. */
     std::vector<VSVulkanExecRetained> detached;
     std::vector<VSVulkanExecPool *> inFlight;
     {

@@ -40,7 +40,25 @@ VSVulkanExecPool::~VSVulkanExecPool() {
         timeline->release();
 }
 
+void VSVulkanExecPool::failUnlessOwner(const VSVulkanExecContext &context, const char *what) const {
+    if (context.owner.load(std::memory_order_acquire) != std::this_thread::get_id()) {
+        std::string message = std::string(what) + " called by a thread that did not acquire the context";
+        vulkanFatal(message.c_str());
+    }
+}
+
+void VSVulkanExecPool::failIfHoldingContext(const char *what) const {
+    const std::thread::id me = std::this_thread::get_id();
+    for (const auto &context : contexts) {
+        if (context->claimed.load(std::memory_order_relaxed) && context->owner.load(std::memory_order_acquire) == me) {
+            std::string message = std::string(what) + " called by a thread already holding a context of the pool";
+            vulkanFatal(message.c_str());
+        }
+    }
+}
+
 void VSVulkanExecPool::retain(VSVulkanExecContext &context, VSGPUReleaseFunc release, void *object, VkDeviceSize bytes) {
+    failUnlessOwner(context, "gpuExecRetain");
     context.retained.push_back({ release, object });
     context.retainedBytes += bytes;
 }
@@ -81,6 +99,7 @@ void VSVulkanExecPool::releaseRetainedNow(VSVulkanExecContext &context) {
 }
 
 void VSVulkanExecPool::abandon(VSVulkanExecContext &context) {
+    failUnlessOwner(context, "gpuExecAbandon");
     releaseRetained(context);
     releaseClaim(context);
 }
@@ -186,6 +205,15 @@ void VSVulkanExecPool::runReleases(std::vector<VSVulkanExecRetained> &detached) 
 }
 
 VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
+    /* Two contract checks before anything else. A release callback may only free, so a
+       thread running a batch of releases has no business here; and one context per pool per
+       thread, since a second acquire from the same thread could only wait for a slot that,
+       once every worker does the same, nobody ever releases. Both used to be hangs; now they
+       name the caller and stop. */
+    dev->failIfRunningReleases("gpuExecAcquire");
+    failIfHoldingContext("gpuExecAcquire");
+    const std::thread::id me = std::this_thread::get_id();
+
     /* Admission: before this thread claims anything, the device may hold it back while the
        bytes pinned by submitted work exceed the in-flight budget. Only submitted work
        counts, so a recording this thread already holds -- on this pool or another -- never
@@ -220,6 +248,8 @@ VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
             return false;
         });
     }
+
+    context->owner.store(me, std::memory_order_release);
 
     /* The GPU may still be chewing on this context's previous submission. Waiting it out here,
        outside every lock, is what lets the other contexts keep submitting meanwhile.
@@ -267,6 +297,7 @@ VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
 
 bool VSVulkanExecPool::submit(VSVulkanExecContext &context, std::string &errorMessage, uint64_t *signaledValue,
     const VSVulkanWait *waits, uint32_t waitCount) {
+    failUnlessOwner(context, "gpuExecSubmit");
     VkResult res = dev->vk.vkEndCommandBuffer(context.cmd);
     if (res != VK_SUCCESS) {
         errorMessage = "vkEndCommandBuffer failed (VkResult " + std::to_string(res) + ")";
@@ -385,6 +416,14 @@ bool VSVulkanExecPool::waitValue(uint64_t value, std::string &errorMessage) {
 }
 
 bool VSVulkanExecPool::waitAll(std::string &errorMessage) {
+    /* A caller holding a context of this pool would leave that recording outside the promise
+       made below and, once every worker did the same, deadlock the ring; fatal instead. The
+       destructor reaches this too, which makes destroying a pool with one's own context
+       claimed the same error. */
+    failIfHoldingContext("gpuExecPoolWaitIdle or freeGPUExecPool");
+    /* Checked here rather than only in the rendezvous below, which a pool that never
+       submitted skips: a release callback may not wait on any pool, submitted or not. */
+    dev->failIfRunningReleases("gpuExecPoolWaitIdle");
     uint64_t value;
     {
         std::lock_guard<VSVulkanQueue> queueLock(*q);
@@ -406,6 +445,7 @@ bool VSVulkanExecPool::waitAll(std::string &errorMessage) {
 }
 
 void VSVulkanExecPool::releaseClaim(VSVulkanExecContext &context) {
+    context.owner.store(std::thread::id(), std::memory_order_relaxed);
     context.claimed.store(false, std::memory_order_release);
     /* The empty critical section pairs the store with the predicate check in acquire(): without
        it the release could land between a waiter's failed scan and its wait, and the notify

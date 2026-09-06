@@ -125,6 +125,32 @@ class PropDictTest(unittest.TestCase):
         with self.assertRaises(vs.Error):
             self.core.std.SetFrameProps(clip, fn=lambda: None)
 
+    def test_setting_a_property_survives_the_frame_closing_mid_iteration(self):
+        # the values are converted before the native map is fetched, so a generator that closes
+        # the frame between two values cannot leave the setter writing into a freed map
+        frame = self.core.std.BlankClip().get_frame(0).copy()
+
+        def values():
+            yield 1
+            frame.close()
+            yield 2
+
+        with self.assertRaises(RuntimeError):
+            frame.props["closes_midway"] = values()
+        self.assertTrue(frame.closed)
+
+    def test_setting_a_property_rejects_a_value_that_closes_the_frame(self):
+        # the same through a conversion rather than the iterator
+        frame = self.core.std.BlankClip().get_frame(0).copy()
+
+        class ClosesOnConversion(int):
+            def __int__(self):
+                frame.close()
+                return 5
+
+        with self.assertRaises(RuntimeError):
+            frame.props["closes_on_convert"] = [1, ClosesOnConversion(2)]
+
 
 if __name__ == "__main__":
     unittest.main()

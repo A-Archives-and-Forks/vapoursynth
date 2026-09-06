@@ -308,6 +308,12 @@ static void VS_CC lutCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
 
         getPlanesArg(in, d->process, vsapi);
 
+        if (d->vi_out.format.bytesPerSample != d->vi->format.bytesPerSample || d->vi_out.format.sampleType != d->vi->format.sampleType) {
+            for (int plane = 0; plane < d->vi->format.numPlanes; plane++)
+                if (!d->process[plane])
+                    RETERROR("Lut: every plane must be processed when bits or floatout changes the sample storage, since an unprocessed plane cannot be passed through unchanged");
+        }
+
         VSFunction *func = vsapi->mapGetFunction(in, "function", 0, &err);
         int lut_elem = vsapi->mapNumElements(in, "lut");
         int lutf_elem = vsapi->mapNumElements(in, "lutf");
@@ -668,6 +674,14 @@ static void VS_CC lut2Create(const VSMap *in, VSMap *out, void *userData, VSCore
         for (int plane = 0; plane < d->vi[0]->format.numPlanes; plane++) {
             if (d->process[plane] && plane >= d->vi[1]->format.numPlanes)
                 RETERROR("Lut2: clipb has fewer planes than clipa, only planes present in both clips can be processed");
+        }
+
+        /* As in Lut: a plane the caller excluded is passed through by sharing clipa's
+           allocation, which only describes the same bytes while the storage is unchanged. */
+        if (d->vi_out.format.bytesPerSample != d->vi[0]->format.bytesPerSample || d->vi_out.format.sampleType != d->vi[0]->format.sampleType) {
+            for (int plane = 0; plane < d->vi[0]->format.numPlanes; plane++)
+                if (!d->process[plane])
+                    RETERROR("Lut2: every plane must be processed when bits or floatout changes the sample storage, since an unprocessed plane cannot be passed through unchanged");
         }
 
         VSFunction *func = vsapi->mapGetFunction(in, "function", 0, &err);

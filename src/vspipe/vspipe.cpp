@@ -33,7 +33,9 @@
 #include <algorithm>
 #include <chrono>
 #include <charconv>
+#include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include "../common/wave.h"
 #ifdef VS_TARGET_OS_WINDOWS
@@ -133,17 +135,42 @@ public:
     FILE *get() const { return file; }
     explicit operator bool() const { return file != nullptr; }
 
-    void close() {
+    /* Returns whether the close succeeded: the last buffered bytes are written by it, so a
+       destination that has run out of room fails here and nowhere else. The destructor ignores
+       the result on purpose, being a fallback for paths that already failed. */
+    bool close() {
+        bool ok = true;
         if (file && owned)
-            fclose(file);
+            ok = fclose(file) == 0;
         file = nullptr;
         owned = false;
+        return ok;
     }
 
 private:
     FILE *file = nullptr;
     bool owned = false;
 };
+
+/* Finishes one output and says whether everything reached it. stdio reports a write as
+   successful the moment it lands in the buffer, so a destination that is full, gone or
+   disconnected only fails when that buffer is emptied -- at the flush, and for the last partial
+   buffer at the close. Neither result may be dropped: an output whose tail was never written is
+   not a successful run, however many bytes fwrite claimed to have taken. */
+static bool finishOutput(FILE *file, OutputFile &holder, const char *what) {
+    if (!file)
+        return true;
+    bool ok = true;
+    if (fflush(file) != 0) {
+        fprintf(stderr, "Error: failed to write the %s: %s\n", what, strerror(errno));
+        ok = false;
+    }
+    if (!holder.close() && ok) {
+        fprintf(stderr, "Error: failed to write the %s: %s\n", what, strerror(errno));
+        ok = false;
+    }
+    return ok;
+}
 
 /////////////////////////////////////////////
 
@@ -193,6 +220,13 @@ struct VSPipeOutputData {
     FILE *outFile = nullptr;
     VSNode *node = nullptr;
     VSNode *alphaNode = nullptr;
+
+    struct Request {
+        VSPipeOutputData *data;
+        bool alpha;
+    };
+    Request mainRequest{this, false};
+    Request alphaRequest{this, true};
 
     /* Total number of frames and samples */
     int totalFrames = -1;
@@ -417,7 +451,9 @@ static std::string nanosecondsToTimecodeString(int64_t ns) {
 }
 
 static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSNode *rnode, const char *errorMsg) {
-    VSPipeOutputData *data = reinterpret_cast<VSPipeOutputData *>(userData);
+    const VSPipeOutputData::Request *request = reinterpret_cast<VSPipeOutputData::Request *>(userData);
+    VSPipeOutputData *data = request->data;
+    const bool isAlpha = request->alpha;
 
     bool printToConsole = false;
     bool hasMeaningfulFPS = false;
@@ -442,7 +478,7 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
     }
 
     if (f) {
-        if (rnode == data->node)
+        if (!isAlpha)
             data->reorderMap[n].first = f;
         else
             data->reorderMap[n].second = f;
@@ -450,9 +486,9 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
         bool completed = isCompletedFrame(data->reorderMap[n], !!data->alphaNode);
 
         if (completed && data->requestedFrames < data->totalFrames) {
-            data->vsapi->getFrameAsync(data->requestedFrames, data->node, frameDoneCallback, userData);
+            data->vsapi->getFrameAsync(data->requestedFrames, data->node, frameDoneCallback, &data->mainRequest);
             if (data->alphaNode)
-                data->vsapi->getFrameAsync(data->requestedFrames, data->alphaNode, frameDoneCallback, userData);
+                data->vsapi->getFrameAsync(data->requestedFrames, data->alphaNode, frameDoneCallback, &data->alphaRequest);
             data->requestedFrames++;
         }
 
@@ -532,7 +568,7 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
 
     if (printToConsole && !data->outputError) {
         /* This frame counted in; the counter itself only moves below, once everything is done. */
-        const int completed = data->completedFrames + (rnode == data->node ? 1 : 0);
+        const int completed = data->completedFrames + (isAlpha ? 0 : 1);
         if (data->vsapi->getNodeType(rnode) == mtVideo) {
             if (hasMeaningfulFPS)
                 fprintf(stderr, "Frame: %d/%d (%.2f fps)\r", completed, data->totalFrames, fps);
@@ -553,7 +589,7 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
        waiter return while the last frame was still being written. */
     {
         std::lock_guard<std::mutex> lock(data->mutex);
-        if (rnode == data->node) {
+        if (!isAlpha) {
             data->completedFrames++;
             if (!data->alphaNode)
                 data->completedAlphaFrames++;
@@ -717,9 +753,9 @@ static bool outputNode(const VSPipeOptions &opts, VSPipeOutputData *data, VSCore
     int intitalRequestSize = std::min(requests, data->totalFrames);
     data->requestedFrames = intitalRequestSize;
     for (int n = 0; n < intitalRequestSize; n++) {
-        data->vsapi->getFrameAsync(n, data->node, frameDoneCallback, data);
+        data->vsapi->getFrameAsync(n, data->node, frameDoneCallback, &data->mainRequest);
         if (data->alphaNode)
-            data->vsapi->getFrameAsync(n, data->alphaNode, frameDoneCallback, data);
+            data->vsapi->getFrameAsync(n, data->alphaNode, frameDoneCallback, &data->alphaRequest);
     }
 
     data->condition.wait(lock, [&]() { return data->totalFrames == data->completedFrames && data->totalFrames == data->completedAlphaFrames; });
@@ -786,8 +822,16 @@ struct MuxStream {
     std::map<int, const VSFrame *> arrived;
 
     /* An alpha clip becomes a fourth plane of the same track. Its frames are requested alongside
-       the video ones and a frame is only usable once both halves have turned up. */
+       the video ones and a frame is only usable once both halves have turned up. Which half a
+       completion belongs to is carried by the request, not deduced from its node: a gray clip
+       may be its own alpha, and then the two nodes are the same pointer. */
     VSNode *alphaNode = nullptr;
+    struct Request {
+        MuxStream *stream;
+        bool alpha;
+    };
+    Request mainRequest{this, false};
+    Request alphaRequest{this, true};
     std::map<int, const VSFrame *> arrivedAlpha;
     const VSFrame *pendingAlphaFrame = nullptr;
 
@@ -813,16 +857,15 @@ struct MuxStream {
 };
 
 void VS_CC muxFrameDoneCallback(void *userData, const VSFrame *f, int n, VSNode *rnode, const char *errorMsg) {
-    MuxStream *stream = static_cast<MuxStream *>(userData);
+    const MuxStream::Request *request = static_cast<MuxStream::Request *>(userData);
+    MuxStream *stream = request->stream;
     MuxContext *ctx = stream->ctx;
 
     std::lock_guard<std::mutex> lock(ctx->mutex);
     stream->inFlight--;
 
     if (f) {
-        /* Alpha is always a Gray clip while the video it belongs to never is, so the two nodes
-           can never be the same and telling them apart this way is unambiguous. */
-        if (rnode == stream->alphaNode)
+        if (request->alpha)
             stream->arrivedAlpha[n] = f;
         else
             stream->arrived[n] = f;
@@ -1143,9 +1186,9 @@ static bool outputMatroska(const VSPipeOptions &opts, FILE *outFile, FILE *timec
         /* Issued with the lock released, since the callback takes it and can run before the call
            requesting the frame has even returned. */
         for (const auto &request : toRequest)
-            vsapi->getFrameAsync(request.second, request.first->node, muxFrameDoneCallback, request.first);
+            vsapi->getFrameAsync(request.second, request.first->node, muxFrameDoneCallback, &request.first->mainRequest);
         for (const auto &request : toRequestAlpha)
-            vsapi->getFrameAsync(request.second, request.first->alphaNode, muxFrameDoneCallback, request.first);
+            vsapi->getFrameAsync(request.second, request.first->alphaNode, muxFrameDoneCallback, &request.first->alphaRequest);
         if (!toRequest.empty())
             continue;
 
@@ -1822,7 +1865,7 @@ int main(int argc, char **argv) {
 
             vsapi->freeNode(mainNode);
         }
-        return 0;
+        return finishOutput(outFile, outFileHolder, "output") ? 0 : 1;
     }
 
     /* Matroska output without a named index takes every output the script set, so assuming index
@@ -1887,9 +1930,10 @@ int main(int argc, char **argv) {
         /* Every file and handle the mux used is released by its holder on the way out, so the
            only thing left to decide here is the status. */
         auto matroskaExit = [&](bool muxFailed) -> int {
-            if (outFile)
-                fflush(outFile);
-            return muxFailed ? 1 : 0;
+            bool written = finishOutput(outFile, outFileHolder, "output");
+            written = finishOutput(timecodesFile, timecodesHolder, "timecodes file") && written;
+            written = finishOutput(jsonFile, jsonHolder, "json file") && written;
+            return (muxFailed || !written) ? 1 : 0;
         };
 
         if (matroskaAllTracks) {
@@ -2013,12 +2057,12 @@ int main(int argc, char **argv) {
                 success = !outputNode(opts, data.get(), vssapi->getCore(se));
         }
 
-        if (outFile)
-            fflush(outFile);
-        if (timecodesFile)
-            fflush(timecodesFile);
-        if (jsonFile)
-            fflush(jsonFile);
+        if (!finishOutput(outFile, outFileHolder, "output"))
+            success = false;
+        if (!finishOutput(timecodesFile, timecodesHolder, "timecodes file"))
+            success = false;
+        if (!finishOutput(jsonFile, jsonHolder, "json file"))
+            success = false;
 
         std::chrono::duration<double> elapsedSeconds = std::chrono::steady_clock::now() - data->startTime;
         if (opts.mode == VSPipeMode::Output) {
@@ -2032,9 +2076,13 @@ int main(int argc, char **argv) {
             fprintf(stderr, "%s", printNodeTimes(node, elapsedSeconds.count(), vsapi->getFreedNodeProcessingTime(core, 0), vsapi).c_str());
         if (filterTimeGraphFile) {
             std::string graph = printNodeGraph(NodePrintMode::FullWithTimes, node, elapsedSeconds.count(), vsapi);
-            fprintf(filterTimeGraphFile, "%s", graph.c_str());
+            if (fprintf(filterTimeGraphFile, "%s", graph.c_str()) < 0)
+                success = false;
         }
     }
+
+    if (!finishOutput(filterTimeGraphFile, filterTimeGraphHolder, "filter time graph"))
+        success = false;
 
     return success ? 0 : 1;
 }

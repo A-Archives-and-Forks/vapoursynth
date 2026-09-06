@@ -583,21 +583,37 @@ cdef class EnvironmentPolicyAPI:
             callbacks = env.on_destroy
             env.on_destroy = None
 
-        if futs is not None:
-            wait_futures(futs)
+        # Everything past this point has to run: env.destroying is already set, so a later call
+        # returns immediately and no one else will finish the job. A callback raising SystemExit
+        # or KeyboardInterrupt used to escape here and strand the environment with its nodes,
+        # frames and core alive forever. Such an exception is carried past the teardown and
+        # raised at the end instead, so the caller still sees it.
+        pending = None
+        try:
+            if futs is not None:
+                wait_futures(futs)
 
-        if callbacks is not None:
-            with use_environment(env).use():
-                for callback in callbacks:
-                    try:
-                        callback()
-                    except Exception as e:
-                        formatted = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-                        if env.core is not None:
-                            env.core.log_message(MessageType.MESSAGE_TYPE_CRITICAL, formatted)
-                        else:
-                            sys.stderr.write(formatted)
+            if callbacks is not None:
+                with use_environment(env).use():
+                    for callback in callbacks:
+                        try:
+                            callback()
+                        except Exception as e:
+                            formatted = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                            if env.core is not None:
+                                env.core.log_message(MessageType.MESSAGE_TYPE_CRITICAL, formatted)
+                            else:
+                                sys.stderr.write(formatted)
+                        except BaseException as e:
+                            if pending is None:
+                                pending = e
+        finally:
+            self._finish_destroy(env)
 
+        if pending is not None:
+            raise pending
+
+    cdef _finish_destroy(self, EnvironmentData env):
         # Invalidate all remaining nodes and frames from this environment
         with env.lock:
             nodes = list(env.known_nodes or [])
@@ -1750,7 +1766,7 @@ cdef class FrameProps(object):
         self.frame._ensure_open()
         if self.readonly:
             raise Error('Cannot delete properties of a read only object')
-        cdef VSMap *m = self.funcs.getFramePropertiesRW(self.frame.f)
+        cdef VSMap *m = NULL
         cdef bytes b = name.encode('utf-8')
         cdef const VSAPI *funcs = self.funcs
         val = value
@@ -1768,32 +1784,58 @@ cdef class FrameProps(object):
                 iter(val)
             except:
                 val = [val]
+            else:
+                # a generator is drained here rather than while the native map is held
+                val = list(val)
+
+        # Everything the caller controls runs in this loop: iterating what they passed, an int
+        # subclass' __int__, a str's encoding. Any of it can close this frame, and the map
+        # pointer belongs to the frame, so it is fetched only once nothing user written is left
+        # to run. Converting first is what makes that possible.
+        converted = []
+        for v in val:
+            if isinstance(v, RawNode):
+                raise Error('Nodes cannot be stored in frame properties')
+            elif isinstance(v, RawFrame):
+                converted.append(('frame', v))
+            elif isinstance(v, Func) or callable(v):
+                raise Error('Functions cannot be stored in frame properties')
+            elif isinstance(v, (int, enum.Flag)):
+                converted.append(('int', int(v)))
+            elif isinstance(v, float):
+                converted.append(('float', float(v)))
+            elif isinstance(v, str):
+                converted.append(('utf8', v.encode('utf-8')))
+            elif isinstance(v, (bytes, bytearray)):
+                converted.append(('binary', bytes(v)))
+            else:
+                raise Error('Setter was passed an unsupported type (' + type(v).__name__ + ')')
+
+        # revalidated after that loop, which may have closed the frame it checked at entry
+        self.frame._ensure_open()
+        for kind, v in converted:
+            if kind == 'frame':
+                (<RawFrame>v)._ensure_open()
+
         self.__delitem__(name)
+        m = self.funcs.getFramePropertiesRW(self.frame.f)
         try:
-            for v in val:
-                if isinstance(v, RawNode):
-                    raise Error('Nodes cannot be stored in frame properties')
-                elif isinstance(v, RawFrame):
-                    (<RawFrame>v)._ensure_open()
+            for kind, v in converted:
+                if kind == 'frame':
                     if funcs.mapSetFrame(m, b, (<RawFrame>v).constf, 1) != 0:
                         raise Error('Not all values are of the same type')
-                elif isinstance(v, Func) or callable(v):
-                    raise Error('Functions cannot be stored in frame properties')
-                elif isinstance(v, (int, enum.Flag)):
-                    if funcs.mapSetInt(m, b, int(v), 1) != 0:
+                elif kind == 'int':
+                    if funcs.mapSetInt(m, b, v, 1) != 0:
                         raise Error('Not all values are of the same type')
-                elif isinstance(v, float):
-                    if funcs.mapSetFloat(m, b, float(v), 1) != 0:
+                elif kind == 'float':
+                    if funcs.mapSetFloat(m, b, v, 1) != 0:
                         raise Error('Not all values are of the same type')
-                elif isinstance(v, str):
-                    s = v.encode('utf-8')
-                    if funcs.mapSetData(m, b, s, <int>len(s), dtUtf8, 1) != 0:
-                        raise Error('Not all values are of the same type')
-                elif isinstance(v, (bytes, bytearray)):
-                    if funcs.mapSetData(m, b, v, <int>len(v), dtBinary, 1) != 0:
+                elif kind == 'utf8':
+                    if funcs.mapSetData(m, b, v, <int>len(v), dtUtf8, 1) != 0:
                         raise Error('Not all values are of the same type')
                 else:
-                    raise Error('Setter was passed an unsupported type (' + type(v).__name__ + ')')
+                    if funcs.mapSetData(m, b, v, <int>len(v), dtBinary, 1) != 0:
+                        raise Error('Not all values are of the same type')
         except Error:
             self.__delitem__(name)
             raise

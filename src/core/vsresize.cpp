@@ -860,6 +860,8 @@ public:
             vszimg *x = new vszimg{ args, userData, core, vsapi };
             VSFilterDependency deps[] = {{x->m_node, rpStrictSpatial}};
             vsapi->createVideoFilter(out, name, &x->m_vi, &vszimg::static_get_frame, &vszimg::free, fmParallel, deps, 1, x, core);
+            if (vsapi->mapGetError(out))
+                vszimg::free(x, core, vsapi);
         } catch (const vszimgxx::zerror &e) {
             std::string errmsg = "Resize error " + std::to_string(e.code) + ": " + e.msg;
             vsapi->mapSetError(out, errmsg.c_str());

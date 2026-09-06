@@ -120,8 +120,8 @@ static int cropVerify(int x, int y, int width, int height, int srcwidth, int src
     if (width <= 0 || height <= 0)
         snprintf(msg, len, "Crop: negative/zero cropping dimensions not allowed");
 
-    if (srcheight > 0 && srcwidth > 0)
-        if (srcheight < height + y || srcwidth < width + x)
+    if (srcheight > 0 && srcwidth > 0 && x >= 0 && y >= 0)
+        if (height > srcheight - y || width > srcwidth - x)
             snprintf(msg, len, "Crop: cropped area extends beyond frame dimensions");
 
     if (fi) {

@@ -133,6 +133,30 @@ class KernelRegressionTests(unittest.TestCase):
         # the other way round only the plane both clips have is processed
         self.core.std.Lut2(b, a, lut=list(range(256)) * 256).get_frame(0)
 
+    def test_lut_refuses_unprocessed_planes_when_the_storage_changes(self):
+        # an unprocessed plane is passed through by sharing the source allocation, which
+        # describes half the bytes the 16 bit output advertises
+        src = self.core.std.BlankClip(format=vs.YUV444P8, width=32, height=16, length=1)
+        for name, call in (
+                ("Lut bits", lambda: self.core.std.Lut(src, planes=[0], bits=16, function=lambda x: x)),
+                ("Lut floatout", lambda: self.core.std.Lut(src, planes=[0], floatout=True, function=lambda x: float(x))),
+                ("Lut2 bits", lambda: self.core.std.Lut2(clipa=src, clipb=src, planes=[0], bits=16, function=lambda x, y: x))):
+            with self.assertRaises(vs.Error, msg=name):
+                call()
+        # the same depth still passes planes through, and processing every plane still converts
+        self.core.std.Lut(src, planes=[0], function=lambda x: x).get_frame(0).close()
+        out = self.core.std.Lut(src, bits=16, function=lambda x: x * 257)
+        self.assertEqual(out.format.bits_per_sample, 16)
+        out.get_frame(0).close()
+
+    def test_crop_rejects_coordinates_that_overflow_the_bounds_check(self):
+        src = self.core.std.BlankClip(format=vs.GRAY8, width=16, height=16, length=1)
+        for kwargs in ({"left": 2147483647}, {"top": 2147483647}, {"left": 2147483640, "top": 2147483640}):
+            with self.assertRaises(vs.Error, msg=str(kwargs)):
+                self.core.std.CropAbs(src, width=4, height=4, **kwargs)
+        # a crop that fits is unaffected
+        self.assertEqual(self.core.std.CropAbs(src, width=4, height=4, left=12, top=12).width, 4)
+
     def test_blankaudio_keep_partial_last_frame(self):
         clip = self.core.std.BlankAudio(length=3073, keep=True)
         for n in (1, 0, 1, 0):

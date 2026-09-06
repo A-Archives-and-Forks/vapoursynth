@@ -308,6 +308,11 @@ VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame * 
                 core->logFatal("Error in frame creation: plane " + std::to_string(plane[i]) + " does not exist in the source frame");
             if (planeSrc[i]->getHeight(plane[i]) != getHeight(i) || planeSrc[i]->getWidth(plane[i]) != getWidth(i))
                 core->logFatal("Error in frame creation: dimensions of plane " + std::to_string(plane[i]) + " do not match. Source: " + std::to_string(planeSrc[i]->getWidth(plane[i])) + "x" + std::to_string(planeSrc[i]->getHeight(plane[i])) + "; destination: " + std::to_string(getWidth(i)) + "x" + std::to_string(getHeight(i)));
+            if (planeSrc[i]->format.vf.bytesPerSample != format.vf.bytesPerSample || planeSrc[i]->format.vf.sampleType != format.vf.sampleType)
+                core->logFatal("Error in frame creation: plane " + std::to_string(plane[i]) + " of the source frame stores " +
+                    std::to_string(planeSrc[i]->format.vf.bytesPerSample) + " byte " + (planeSrc[i]->format.vf.sampleType == stFloat ? std::string("float") : std::string("integer")) +
+                    " samples but the destination frame stores " + std::to_string(format.vf.bytesPerSample) + " byte " +
+                    (format.vf.sampleType == stFloat ? std::string("float") : std::string("integer")) + " samples; a plane can only be shared between frames with the same sample storage");
             data[i] = planeSrc[i]->data[plane[i]];
             data[i]->add_ref();
         } else if (gpuResident) {

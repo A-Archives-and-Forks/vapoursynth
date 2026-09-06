@@ -905,5 +905,48 @@ class DeferredDestroyTest(unittest.TestCase):
             pol._api.destroy_environment(owner)
 
 
+class DestroyCallbackTest(unittest.TestCase):
+    @subprocess_runner
+    def test_baseexception_from_a_destroy_callback_still_tears_down(self):
+        # SystemExit and friends used to escape teardown, leaving the environment marked as
+        # destroying with its nodes, frames and core alive and no way to finish the job
+        def boom():
+            raise SystemExit(7)
+
+        with _with_policy() as pol:
+            env = pol._api.create_environment()
+            wrapped = pol._api.wrap_environment(env)
+            with wrapped.use():
+                core = vs.core.core
+                clip = core.std.BlankClip(width=16, height=16, length=1)
+                frame = clip.get_frame(0)
+                vs.register_on_destroy(boom)
+
+            with self.assertRaises(SystemExit):
+                pol._api.destroy_environment(env)
+
+            self.assertFalse(wrapped.alive)
+            self.assertTrue(frame.closed)
+
+    @subprocess_runner
+    def test_rejected_filter_creation_does_not_strand_the_input(self):
+        # resize hands its instance to the factory; a rejected VSVideoInfo used to leave the
+        # instance, and the input node reference it holds, alive for the life of the process
+        messages = []
+        with _with_policy() as pol:
+            env = pol._api.create_environment()
+            wrapped = pol._api.wrap_environment(env)
+            with wrapped.use():
+                core = vs.core.core
+                core.add_log_handler(lambda level, msg: messages.append(msg))
+                clip = core.std.BlankClip(format=vs.GRAY8, width=16, height=16, length=1)
+                with self.assertRaises(vs.Error):
+                    core.resize.Point(clip, width=0)
+                del clip
+            pol._api.destroy_environment(env)
+            self.assertFalse(wrapped.alive)
+        self.assertEqual([m for m in messages if "still exist" in m], [])
+
+
 if __name__ == "__main__":
     unittest.main()

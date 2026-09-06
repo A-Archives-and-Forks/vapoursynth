@@ -178,7 +178,8 @@ static unsigned sq_interior_word(const uint16_t *const *rows, uint16_t *dst, uns
     return j;
 }
 
-// Word path for N>=9, where N*N taps overflow int32: each row summed in int32 (always safe),
+// Word path for N>=9, and for a 7x7 whose coefficients overflow int32 (see sq_word_fits_i32):
+// each row summed in int32 (always safe),
 // spilled into int64 accumulators, exact int64 -> float at the end -- bit-exact with the int64 C
 // reference. One run of BLK independent blocks (b loop innermost for ILP). The 64-bit accumulators
 // are heavy, so the 512-bit tier uses 2 blocks (4 spills registers past 9x9); 256-bit stays at 1.
@@ -272,12 +273,27 @@ static unsigned sq_interior_float(const float *const *rows, float *dst, unsigned
     return j;
 }
 
+// Whether an N*N word convolution can run in the int32 path: the biased tap products reach
+// 32768 * |m| whatever the depth, and the debiased sum reaches maxval * |m|, so the larger of
+// the two times the coefficient magnitudes has to stay below 2^31. Always true up to 5x5 with
+// the +-1023 coefficient limit, never at 9x9 and up, and a property of the matrix at 7x7,
+// where 49 taps of 1023 on 16 bit samples reach 3.3e9 and wrapped the interior to black.
+template <unsigned N>
+static bool sq_word_fits_i32(const int16_t *m, unsigned maxval)
+{
+    int64_t sum = 0;
+    for (unsigned i = 0; i < N * N; ++i)
+        sum += m[i] < 0 ? -static_cast<int64_t>(m[i]) : static_cast<int64_t>(m[i]);
+    return sum * static_cast<int64_t>(maxval < 32768 ? 32768 : maxval) <= INT32_MAX;
+}
+
 // ---- plane driver: scalar edges + SIMD interior ----
 template <class ISA, class T, unsigned N>
 static void sq_plane(const void *src, ptrdiff_t ss, void *dst, ptrdiff_t ds, const vs_generic_params &p, unsigned W, unsigned H)
 {
     constexpr unsigned S = N / 2;
     typename ISA::fvec sc = ISA::set1_ps(p.div), bi = ISA::set1_ps(p.bias), sm = ISA::satmask(p.saturate);
+    [[maybe_unused]] const bool wordFitsI32 = sq_word_fits_i32<N>(p.matrix, p.maxval);
     for (unsigned i = 0; i < H; ++i) {
         const T *rows[N];
         for (unsigned r = 0; r < N; ++r)
@@ -290,6 +306,9 @@ static void sq_plane(const void *src, ptrdiff_t ss, void *dst, ptrdiff_t ds, con
             typename ISA::ivec mv = ISA::word_maxval(p.maxval);
             if constexpr (N > 7)
                 aend = sq_interior_word_i64<ISA, N>(rows, d, S, W, p.matrix, sc, bi, sm, mv);
+            else if constexpr (N == 7)
+                aend = wordFitsI32 ? sq_interior_word<ISA, N>(rows, d, S, W, p.matrix, sc, bi, sm, mv)
+                                   : sq_interior_word_i64<ISA, N>(rows, d, S, W, p.matrix, sc, bi, sm, mv);
             else
                 aend = sq_interior_word<ISA, N>(rows, d, S, W, p.matrix, sc, bi, sm, mv);
         } else

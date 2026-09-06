@@ -365,6 +365,19 @@ unsigned sq_interior_half(const uint16_t *const *rows, uint16_t *dst, unsigned S
     return j;
 }
 
+// Whether an N*N word convolution can run in the int32 path: the biased tap products reach
+// 32768 * |m| whatever the depth, and the debiased sum reaches maxval * |m|, so the larger of
+// the two times the coefficient magnitudes has to stay below 2^31. Always true up to 5x5 with
+// the +-1023 coefficient limit, never at 9x9 and up, and a property of the matrix at 7x7.
+template <unsigned N>
+static bool sq_word_fits_i32(const int16_t *m, unsigned maxval)
+{
+    int64_t sum = 0;
+    for (unsigned i = 0; i < N * N; ++i)
+        sum += m[i] < 0 ? -static_cast<int64_t>(m[i]) : static_cast<int64_t>(m[i]);
+    return sum * static_cast<int64_t>(maxval < 32768 ? 32768 : maxval) <= INT32_MAX;
+}
+
 // ---- plane driver: scalar mirror edges + SIMD interior ----
 
 enum class SqType { Byte, Word, Float, Half };
@@ -377,6 +390,7 @@ void sq_plane(const void *src, ptrdiff_t ss, void *dst, ptrdiff_t ds, const vs_g
     float32x4_t sc = vdupq_n_f32(p.div), bi = vdupq_n_f32(p.bias);
     uint32x4_t sm = nc_satmask(p.saturate);
     uint16x8_t mv = vdupq_n_u16(p.maxval);
+    [[maybe_unused]] const bool wordFitsI32 = sq_word_fits_i32<N>(p.matrix, p.maxval);
 
     for (unsigned i = 0; i < H; ++i) {
         const T *rows[N];
@@ -391,6 +405,9 @@ void sq_plane(const void *src, ptrdiff_t ss, void *dst, ptrdiff_t ds, const vs_g
         else if constexpr (TY == SqType::Word) {
             if constexpr (N > 7)
                 aend = sq_interior_word_i64<N>(rows, d, S, W, p.matrix, sc, bi, sm, mv);
+            else if constexpr (N == 7)
+                aend = wordFitsI32 ? sq_interior_word_i32<N>(rows, d, S, W, p.matrix, sc, bi, sm, mv)
+                                   : sq_interior_word_i64<N>(rows, d, S, W, p.matrix, sc, bi, sm, mv);
             else
                 aend = sq_interior_word_i32<N>(rows, d, S, W, p.matrix, sc, bi, sm, mv);
         } else if constexpr (TY == SqType::Float)

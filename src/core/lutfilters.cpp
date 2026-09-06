@@ -665,6 +665,11 @@ static void VS_CC lut2Create(const VSMap *in, VSMap *out, void *userData, VSCore
 
         getPlanesArg(in, d->process, vsapi);
 
+        for (int plane = 0; plane < d->vi[0]->format.numPlanes; plane++) {
+            if (d->process[plane] && plane >= d->vi[1]->format.numPlanes)
+                RETERROR("Lut2: clipb has fewer planes than clipa, only planes present in both clips can be processed");
+        }
+
         VSFunction *func = vsapi->mapGetFunction(in, "function", 0, &err);
         int lut_elem = vsapi->mapNumElements(in, "lut");
         int lutf_elem = vsapi->mapNumElements(in, "lutf");

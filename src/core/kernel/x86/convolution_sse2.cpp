@@ -85,22 +85,28 @@ struct ISA_SSE2 {
         return _mm_and_ps(_mm_add_ps(_mm_mul_ps(x, scale), bias), mask);
     }
 
+    // The scalar reference clamps the float result to the type range before rounding; cvtps_epi32
+    // turns anything past int32 into INT_MIN, which the saturating packs below read as 0, so
+    // without this a tiny divisor or large gain blackened what should have hit the maximum.
+    static ivec cvt_clamped(fvec t, float maxf)
+    {
+        return _mm_cvtps_epi32(_mm_min_ps(_mm_max_ps(t, _mm_setzero_ps()), _mm_set1_ps(maxf)));
+    }
+
     static void store_u8(uint8_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask)
     {
-        fvec t;
-        t = scale_bias_sat(_mm_cvtepi32_ps(lo), scale, bias, mask); lo = _mm_cvtps_epi32(t);
-        t = scale_bias_sat(_mm_cvtepi32_ps(hi), scale, bias, mask); hi = _mm_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm_cvtepi32_ps(lo), scale, bias, mask), 255.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm_cvtepi32_ps(hi), scale, bias, mask), 255.0f);
         lo = _mm_packs_epi32(lo, hi);
         lo = _mm_packus_epi16(lo, lo);
         _mm_storel_epi64((__m128i *)dst, lo);
     }
     static void store_u16(uint16_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask, ivec maxval)
     {
-        fvec t;
-        t = scale_bias_sat(_mm_cvtepi32_ps(lo), scale, bias, mask);
-        lo = _mm_cvtps_epi32(t); lo = _mm_add_epi32(lo, _mm_set1_epi32(INT16_MIN));
-        t = scale_bias_sat(_mm_cvtepi32_ps(hi), scale, bias, mask);
-        hi = _mm_cvtps_epi32(t); hi = _mm_add_epi32(hi, _mm_set1_epi32(INT16_MIN));
+        lo = cvt_clamped(scale_bias_sat(_mm_cvtepi32_ps(lo), scale, bias, mask), 65535.0f);
+        lo = _mm_add_epi32(lo, _mm_set1_epi32(INT16_MIN));
+        hi = cvt_clamped(scale_bias_sat(_mm_cvtepi32_ps(hi), scale, bias, mask), 65535.0f);
+        hi = _mm_add_epi32(hi, _mm_set1_epi32(INT16_MIN));
         lo = _mm_packs_epi32(lo, hi);
         lo = _mm_min_epi16(lo, maxval);
         lo = _mm_sub_epi16(lo, _mm_set1_epi16(INT16_MIN));

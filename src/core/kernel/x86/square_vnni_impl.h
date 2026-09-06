@@ -64,10 +64,12 @@ static unsigned sq_interior_byte_vnni(const uint8_t *const *rows, uint8_t *dst, 
         for (unsigned d = 0; d < 4; ++d) { unsigned k = g * 4 + d; int8_t cv = k < N ? static_cast<int8_t>(m[r * N + k]) : 0; c |= static_cast<uint32_t>(static_cast<uint8_t>(cv)) << (8 * d); }
         pk[r][g] = c;
     }
-    const __m512i zero = _mm512_setzero_si512(), v255 = _mm512_set1_epi32(255);
+    // Clamped in float before the conversion, as the scalar path does: past int32 cvtps_epi32
+    // gives INT_MIN, which an integer clamp would then read as 0 rather than 255.
+    const __m512 fzero = _mm512_setzero_ps(), f255 = _mm512_set1_ps(255.0f);
     auto store16 = [&](unsigned col, __m512i acc) {
         __m512 f = _mm512_and_ps(_mm512_fmadd_ps(_mm512_cvtepi32_ps(acc), sc, bi), sm);
-        __m512i o = _mm512_min_epi32(_mm512_max_epi32(_mm512_cvtps_epi32(f), zero), v255);
+        __m512i o = _mm512_cvtps_epi32(_mm512_min_ps(_mm512_max_ps(f, fzero), f255));
         _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + col), _mm512_cvtepi32_epi8(o));
     };
     unsigned end = W > S ? W - S : 0, j = S;

@@ -1686,8 +1686,8 @@ bool resolveFrameState(const ConversionSpec &spec, const VSMap *props, const VSA
 
 /* ------------------------------------------------------------------------------------------
    The plan: a pure function of (spec, state). Up to two passes per plane, each one
-   dispatch; a plane whose windows are all identities and whose affine is one shares its
-   source plane instead of running anything. */
+   dispatch; a plane whose windows are all identities, whose affine is one and whose storage
+   matches shares its source plane instead of running anything. */
 
 struct AxisPass {
     bool run = false;
@@ -2098,12 +2098,19 @@ FramePlan planFrame(const ConversionSpec &spec, const FrameState &st) {
         const bool needAffine = so.scale != 1.0f || so.offset != 0.0f;
         const bool dithered = ditherApplies(spec.dither, spec.srcFmt, spec.dstFmt,
             st.fullIn, st.fullOut);
+        /* Sharing hands the source bytes to the destination, which is only an identity when
+           both store samples the same way: float16 and float32 have unity range and zero
+           offset alike, so a plain GRAYH to GRAYS conversion looked like nothing to do and
+           published half-precision bytes under a float32 format. The identity gather below
+           converts. */
+        const bool sameStorage = spec.srcFmt.sampleType == spec.dstFmt.sampleType &&
+            spec.srcFmt.bytesPerSample == spec.dstFmt.bytesPerSample;
 
         pp.count = buildChainPasses(pp.pass, g.axH, g.axVTop, g.axVBottom,
             srcPW, srcPH, dstPW, dstPH, interlaced, spec.hFirst, so.scale, so.offset,
             &fp.scratchBytes);
         if (pp.count == 0) {
-            if (!needAffine && !dithered) {
+            if (!needAffine && !dithered && sameStorage) {
                 pp.share = true;
                 fp.anyShare = true;
                 continue;

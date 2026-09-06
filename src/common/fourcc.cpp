@@ -60,7 +60,7 @@ constexpr Traits fourcc_traits[] = {
     { cfYUV,  stInteger,  8, 1, 1, 0, VS_FCC('YV12'), PLANAR,         1 },
     { cfYUV,  stInteger,  8, 1, 1, 1, VS_FCC('I420'), PLANAR,         1, 1,  0, SWAP_UV },
     { cfYUV,  stInteger,  8, 1, 1, 2, VS_FCC('IYUV'), PLANAR,         1, 1,  0, SWAP_UV },
-    { cfGray, stInteger,  8, 0, 0, 0, VS_FCC('Y800'), PLANAR,         1 },
+    { cfGray, stInteger,  8, 0, 0, 0, VS_FCC('Y800'), PLANAR,         1, 1,  8 },
     { cfYUV,  stInteger,  8, 0, 0, 0, VS_FCC('YV24'), PLANAR,         1 },
     { cfYUV,  stInteger,  8, 1, 0, 0, VS_FCC('YV16'), PLANAR,         1 },
     { cfYUV,  stInteger,  8, 2, 0, 0, VS_FCC('Y41B'), PLANAR,         1 },

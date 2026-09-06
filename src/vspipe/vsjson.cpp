@@ -21,6 +21,7 @@
 #include "vsjson.h"
 #include <charconv>
 #include <cmath>
+#include <system_error>
 
 static bool isAsciiPrintable(const std::string &s) {
     for (const auto c : s)
@@ -34,8 +35,10 @@ static std::string doubleToString(double v) {
        parser accepts, so they turn into null. */
     if (!std::isfinite(v))
         return "null";
-    char buffer[100];
-    auto res = std::to_chars(buffer, buffer + sizeof(buffer), v, std::chars_format::fixed);
+    char buffer[64];
+    auto res = std::to_chars(buffer, buffer + sizeof(buffer), v);
+    if (res.ec != std::errc())
+        return "null";
     return std::string(buffer, res.ptr - buffer);
 }
 

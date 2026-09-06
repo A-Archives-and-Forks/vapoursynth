@@ -82,11 +82,18 @@ struct ISA_AVX2 {
         return _mm256_and_ps(_mm256_fmadd_ps(x, scale, bias), mask);
     }
 
+    // The scalar reference clamps the float result to the type range before rounding; cvtps_epi32
+    // turns anything past int32 into INT_MIN, which the saturating packs below read as 0, so
+    // without this a tiny divisor or large gain blackened what should have hit the maximum.
+    static ivec cvt_clamped(fvec t, float maxf)
+    {
+        return _mm256_cvtps_epi32(_mm256_min_ps(_mm256_max_ps(t, _mm256_setzero_ps()), _mm256_set1_ps(maxf)));
+    }
+
     static void store_u8(uint8_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask)
     {
-        fvec t;
-        t = scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask); lo = _mm256_cvtps_epi32(t);
-        t = scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask); hi = _mm256_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask), 255.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask), 255.0f);
         lo = _mm256_packs_epi32(lo, hi);
         lo = _mm256_packus_epi16(lo, lo);
         lo = _mm256_permute4x64_epi64(lo, _MM_SHUFFLE(3, 1, 2, 0));
@@ -94,9 +101,8 @@ struct ISA_AVX2 {
     }
     static void store_u16(uint16_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask, ivec maxval)
     {
-        fvec t;
-        t = scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask); lo = _mm256_cvtps_epi32(t);
-        t = scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask); hi = _mm256_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask), 65535.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask), 65535.0f);
         lo = _mm256_packus_epi32(lo, hi);
         lo = _mm256_min_epu16(lo, maxval);
         _mm256_store_si256((__m256i *)dst, lo);
@@ -106,9 +112,8 @@ struct ISA_AVX2 {
     static void storeu_ps(float *p, fvec v) { _mm256_storeu_ps(p, v); }
     static void storeu_u8(uint8_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask)
     {
-        fvec t;
-        t = scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask); lo = _mm256_cvtps_epi32(t);
-        t = scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask); hi = _mm256_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask), 255.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask), 255.0f);
         lo = _mm256_packs_epi32(lo, hi);
         lo = _mm256_packus_epi16(lo, lo);
         lo = _mm256_permute4x64_epi64(lo, _MM_SHUFFLE(3, 1, 2, 0));
@@ -116,9 +121,8 @@ struct ISA_AVX2 {
     }
     static void storeu_u16(uint16_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask, ivec maxval)
     {
-        fvec t;
-        t = scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask); lo = _mm256_cvtps_epi32(t);
-        t = scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask); hi = _mm256_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(lo), scale, bias, mask), 65535.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm256_cvtepi32_ps(hi), scale, bias, mask), 65535.0f);
         lo = _mm256_packus_epi32(lo, hi);
         lo = _mm256_min_epu16(lo, maxval);
         _mm256_storeu_si256((__m256i *)dst, lo);
@@ -146,8 +150,8 @@ struct ISA_AVX2 {
     {
         fvec flo = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm256_cvtpd_ps(i64_to_pd(la))), _mm256_cvtpd_ps(i64_to_pd(lb)), 1);
         fvec fhi = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm256_cvtpd_ps(i64_to_pd(ha))), _mm256_cvtpd_ps(i64_to_pd(hb)), 1);
-        flo = scale_bias_sat(flo, scale, bias, mask); ivec ilo = _mm256_cvtps_epi32(flo);
-        fhi = scale_bias_sat(fhi, scale, bias, mask); ivec ihi = _mm256_cvtps_epi32(fhi);
+        ivec ilo = cvt_clamped(scale_bias_sat(flo, scale, bias, mask), 65535.0f);
+        ivec ihi = cvt_clamped(scale_bias_sat(fhi, scale, bias, mask), 65535.0f);
         ivec out = _mm256_packus_epi32(ilo, ihi);
         out = _mm256_min_epu16(out, maxval);
         _mm256_storeu_si256((__m256i *)dst, out);

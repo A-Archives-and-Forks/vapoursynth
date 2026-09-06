@@ -59,6 +59,15 @@ T *line_ptr(T *ptr, unsigned i, ptrdiff_t stride)
     return (T *)(((unsigned char *)ptr) + static_cast<ptrdiff_t>(i) * stride);
 }
 
+// The scalar reference clamps the float result to the type range before rounding. The backends'
+// cvt_i turns anything past int32 into INT_MIN, which the saturating packs then read as 0, so
+// the SIMD paths clamp in float as well or a large gain blackens what should saturate white.
+template <class B>
+FORCE_INLINE typename B::fvec clamp_to_range(typename B::fvec x, float maxval)
+{
+    return B::fmin(B::fmax(x, B::set1_f(0.0f)), B::set1_f(maxval));
+}
+
 constexpr uint8_t STENCIL_ALL = 0xFF;
 constexpr uint8_t STENCIL_H = 0x18;
 constexpr uint8_t STENCIL_V = 0x42;
@@ -165,8 +174,8 @@ struct PrewittSobelByte : PrewittSobelTraits, ByteTraits<B> {
         auto f_hilo = B::fmul(B::fsqrt(B::cvt_f(gxy_hilo)), sc);
         auto f_hihi = B::fmul(B::fsqrt(B::cvt_f(gxy_hihi)), sc);
 
-        auto tmpi_lo = B::packs32(B::cvt_i(f_lolo), B::cvt_i(f_lohi));
-        auto tmpi_hi = B::packs32(B::cvt_i(f_hilo), B::cvt_i(f_hihi));
+        auto tmpi_lo = B::packs32(B::cvt_i(clamp_to_range<B>(f_lolo, 255.0f)), B::cvt_i(clamp_to_range<B>(f_lohi, 255.0f)));
+        auto tmpi_hi = B::packs32(B::cvt_i(clamp_to_range<B>(f_hilo, 255.0f)), B::cvt_i(clamp_to_range<B>(f_hihi, 255.0f)));
         return B::packus16(tmpi_lo, tmpi_hi);
 #undef HI
 #undef LO
@@ -225,8 +234,8 @@ struct PrewittSobelWord : PrewittSobelTraits, WordTraits<B> {
         auto gxy_lo = B::fmul(B::fsqrt(B::fsumsq(gxf_lo, gyf_lo)), sc);
         auto gxy_hi = B::fmul(B::fsqrt(B::fsumsq(gxf_hi, gyf_hi)), sc);
 
-        auto tmpi_lo = B::wsign32(B::cvt_i(gxy_lo));
-        auto tmpi_hi = B::wsign32(B::cvt_i(gxy_hi));
+        auto tmpi_lo = B::wsign32(B::cvt_i(clamp_to_range<B>(gxy_lo, 65535.0f)));
+        auto tmpi_hi = B::wsign32(B::cvt_i(clamp_to_range<B>(gxy_hi, 65535.0f)));
         auto tmp = B::pack_word(tmpi_lo, tmpi_hi);
         tmp = B::wmin(tmp, maxval);
         return B::wunsign(tmp);
@@ -737,8 +746,8 @@ struct ConvolutionByte : ConvolutionIntTraits<B>, ByteTraits<B> {
         auto f_hilo = B::fand(B::fadd(B::fmul(B::cvt_f(accum_hilo), div), bias), saturate_mask);
         auto f_hihi = B::fand(B::fadd(B::fmul(B::cvt_f(accum_hihi), div), bias), saturate_mask);
 
-        accum_lolo = B::packs32(B::cvt_i(f_lolo), B::cvt_i(f_lohi));
-        accum_hilo = B::packs32(B::cvt_i(f_hilo), B::cvt_i(f_hihi));
+        accum_lolo = B::packs32(B::cvt_i(clamp_to_range<B>(f_lolo, 255.0f)), B::cvt_i(clamp_to_range<B>(f_lohi, 255.0f)));
+        accum_hilo = B::packs32(B::cvt_i(clamp_to_range<B>(f_hilo, 255.0f)), B::cvt_i(clamp_to_range<B>(f_hihi, 255.0f)));
         return B::packus16(accum_lolo, accum_hilo);
 #undef HI
 #undef LO
@@ -790,8 +799,8 @@ struct ConvolutionWord : ConvolutionIntTraits<B>, WordTraits<B> {
 
         auto f_lo = B::fand(B::fadd(B::fmul(B::cvt_f(accum_lo), div), bias), saturate_mask);
         auto f_hi = B::fand(B::fadd(B::fmul(B::cvt_f(accum_hi), div), bias), saturate_mask);
-        accum_lo = B::wsign32(B::cvt_i(f_lo));
-        accum_hi = B::wsign32(B::cvt_i(f_hi));
+        accum_lo = B::wsign32(B::cvt_i(clamp_to_range<B>(f_lo, 65535.0f)));
+        accum_hi = B::wsign32(B::cvt_i(clamp_to_range<B>(f_hi, 65535.0f)));
 
         auto tmp = B::pack_word(accum_lo, accum_hi);
         tmp = B::wmin(tmp, maxval);

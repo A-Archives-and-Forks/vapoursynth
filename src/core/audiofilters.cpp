@@ -1218,7 +1218,8 @@ static void generateWaveform(uint8_t *dstp, int length, uint64_t phase, uint64_t
 }
 
 typedef struct {
-    VSFrame *f;
+    VSFrame *f;      /* the shared full-length silent frame, when keep is set */
+    VSFrame *fLast;  /* the shared final frame of a length that is not a multiple of the frame size, when keep is set */
     VSAudioInfo ai;
     WaveForm waveform;
     double amplitude;
@@ -1259,20 +1260,18 @@ static const VSFrame *VS_CC blankAudioGetframe(int n, int activationReason, void
             return frame;
         }
 
-        VSFrame *frame = nullptr;
-        if (!d->f) {
-            frame = vsapi->newAudioFrame(&d->ai.format, samples, nullptr, core);
-            for (int channel = 0; channel < d->ai.format.numChannels; channel++)
-                memset(vsapi->getWritePtr(frame, channel), 0, samples * d->ai.format.bytesPerSample);
-        }
+        VSFrame **shared = d->keep ? ((samples == VS_AUDIO_FRAME_SAMPLES) ? &d->f : &d->fLast) : nullptr;
+        if (shared && *shared)
+            return vsapi->addFrameRef(*shared);
 
-        if (d->keep) {
-            if (frame)
-                d->f = frame;
-            return vsapi->addFrameRef(d->f);
-        } else {
+        VSFrame *frame = vsapi->newAudioFrame(&d->ai.format, samples, nullptr, core);
+        for (int channel = 0; channel < d->ai.format.numChannels; channel++)
+            memset(vsapi->getWritePtr(frame, channel), 0, samples * d->ai.format.bytesPerSample);
+
+        if (!shared)
             return frame;
-        }
+        *shared = frame;
+        return vsapi->addFrameRef(frame);
     }
 
     return nullptr;
@@ -1281,6 +1280,7 @@ static const VSFrame *VS_CC blankAudioGetframe(int n, int activationReason, void
 static void VS_CC blankAudioFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
     BlankAudioData *d = reinterpret_cast<BlankAudioData *>(instanceData);
     vsapi->freeFrame(d->f);
+    vsapi->freeFrame(d->fLast);
     delete d;
 }
 

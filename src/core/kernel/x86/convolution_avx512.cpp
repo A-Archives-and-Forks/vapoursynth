@@ -88,11 +88,18 @@ struct ISA_AVX512 {
         return _mm512_and_ps(_mm512_fmadd_ps(x, scale, bias), mask);
     }
 
+    // The scalar reference clamps the float result to the type range before rounding; cvtps_epi32
+    // turns anything past int32 into INT_MIN, which the saturating packs below read as 0, so
+    // without this a tiny divisor or large gain blackened what should have hit the maximum.
+    static ivec cvt_clamped(fvec t, float maxf)
+    {
+        return _mm512_cvtps_epi32(_mm512_min_ps(_mm512_max_ps(t, _mm512_setzero_ps()), _mm512_set1_ps(maxf)));
+    }
+
     static void store_u8(uint8_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask)
     {
-        fvec t;
-        t = scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask); lo = _mm512_cvtps_epi32(t);
-        t = scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask); hi = _mm512_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask), 255.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask), 255.0f);
         lo = _mm512_packs_epi32(lo, hi);          // per-lane: 32 i16 linear [0..31]
         lo = _mm512_packus_epi16(lo, lo);         // per-lane: valid bytes in low qword
         // Gather the low qword of each 128-bit lane (qwords 0,2,4,6) into the low 256.
@@ -102,9 +109,8 @@ struct ISA_AVX512 {
     }
     static void store_u16(uint16_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask, ivec maxval)
     {
-        fvec t;
-        t = scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask); lo = _mm512_cvtps_epi32(t);
-        t = scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask); hi = _mm512_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask), 65535.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask), 65535.0f);
         lo = _mm512_packus_epi32(lo, hi);         // per-lane: 32 u16 linear [0..31]
         lo = _mm512_min_epu16(lo, maxval);
         _mm512_store_si512((void *)dst, lo);
@@ -114,9 +120,8 @@ struct ISA_AVX512 {
     static void storeu_ps(float *p, fvec v) { _mm512_storeu_ps(p, v); }
     static void storeu_u8(uint8_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask)
     {
-        fvec t;
-        t = scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask); lo = _mm512_cvtps_epi32(t);
-        t = scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask); hi = _mm512_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask), 255.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask), 255.0f);
         lo = _mm512_packs_epi32(lo, hi);
         lo = _mm512_packus_epi16(lo, lo);
         ivec idx = _mm512_setr_epi64(0, 2, 4, 6, 1, 3, 5, 7);
@@ -125,9 +130,8 @@ struct ISA_AVX512 {
     }
     static void storeu_u16(uint16_t *dst, ivec lo, ivec hi, fvec scale, fvec bias, fvec mask, ivec maxval)
     {
-        fvec t;
-        t = scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask); lo = _mm512_cvtps_epi32(t);
-        t = scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask); hi = _mm512_cvtps_epi32(t);
+        lo = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(lo), scale, bias, mask), 65535.0f);
+        hi = cvt_clamped(scale_bias_sat(_mm512_cvtepi32_ps(hi), scale, bias, mask), 65535.0f);
         lo = _mm512_packus_epi32(lo, hi);
         lo = _mm512_min_epu16(lo, maxval);
         _mm512_storeu_si512((void *)dst, lo);
@@ -146,8 +150,8 @@ struct ISA_AVX512 {
     {
         fvec flo = _mm512_insertf32x8(_mm512_castps256_ps512(_mm512_cvtepi64_ps(la)), _mm512_cvtepi64_ps(lb), 1);
         fvec fhi = _mm512_insertf32x8(_mm512_castps256_ps512(_mm512_cvtepi64_ps(ha)), _mm512_cvtepi64_ps(hb), 1);
-        flo = scale_bias_sat(flo, scale, bias, mask); ivec ilo = _mm512_cvtps_epi32(flo);
-        fhi = scale_bias_sat(fhi, scale, bias, mask); ivec ihi = _mm512_cvtps_epi32(fhi);
+        ivec ilo = cvt_clamped(scale_bias_sat(flo, scale, bias, mask), 65535.0f);
+        ivec ihi = cvt_clamped(scale_bias_sat(fhi, scale, bias, mask), 65535.0f);
         ivec out = _mm512_packus_epi32(ilo, ihi);
         out = _mm512_min_epu16(out, maxval);
         _mm512_storeu_si512((void *)dst, out);

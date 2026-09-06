@@ -440,15 +440,6 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
         }
     }
 
-    // completed frames simply correspond to how many times the completion callback is called
-    if (rnode == data->node) {
-        data->completedFrames++;
-        if (!data->alphaNode)
-            data->completedAlphaFrames++;
-    } else {
-        data->completedAlphaFrames++;
-    }
-
     if (f) {
         if (rnode == data->node)
             data->reorderMap[n].first = f;
@@ -539,22 +530,37 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
     }
 
     if (printToConsole && !data->outputError) {
+        /* This frame counted in; the counter itself only moves below, once everything is done. */
+        const int completed = data->completedFrames + (rnode == data->node ? 1 : 0);
         if (data->vsapi->getNodeType(rnode) == mtVideo) {
             if (hasMeaningfulFPS)
-                fprintf(stderr, "Frame: %d/%d (%.2f fps)\r", data->completedFrames, data->totalFrames, fps);
+                fprintf(stderr, "Frame: %d/%d (%.2f fps)\r", completed, data->totalFrames, fps);
             else
-                fprintf(stderr, "Frame: %d/%d\r", data->completedFrames, data->totalFrames);
+                fprintf(stderr, "Frame: %d/%d\r", completed, data->totalFrames);
         } else {
             if (hasMeaningfulFPS)
-                fprintf(stderr, "Sample: %" PRId64 "/%" PRId64 " (%.2f sps)\r", static_cast<int64_t>(data->completedFrames) * VS_AUDIO_FRAME_SAMPLES, static_cast<int64_t>(data->totalFrames) * VS_AUDIO_FRAME_SAMPLES, fps);
+                fprintf(stderr, "Sample: %" PRId64 "/%" PRId64 " (%.2f sps)\r", static_cast<int64_t>(completed) * VS_AUDIO_FRAME_SAMPLES, static_cast<int64_t>(data->totalFrames) * VS_AUDIO_FRAME_SAMPLES, fps);
             else
-                fprintf(stderr, "Sample: %" PRId64 "/%" PRId64 "\r", static_cast<int64_t>(data->completedFrames) * VS_AUDIO_FRAME_SAMPLES, static_cast<int64_t>(data->totalFrames) * VS_AUDIO_FRAME_SAMPLES);
+                fprintf(stderr, "Sample: %" PRId64 "/%" PRId64 "\r", static_cast<int64_t>(completed) * VS_AUDIO_FRAME_SAMPLES, static_cast<int64_t>(data->totalFrames) * VS_AUDIO_FRAME_SAMPLES);
         }
     }
 
-    if (data->totalFrames == data->completedFrames && data->totalFrames == data->completedAlphaFrames) {
+    /* Counted last and under the mutex: outputNode reads the counters reaching the total as
+       "every frame written and released" and tears the output down on it, so nothing in this
+       callback may follow the increment, and it checks under the same mutex, so the increment
+       cannot land between its check and its wait. Counting at entry, as this used to, let the
+       waiter return while the last frame was still being written. */
+    {
         std::lock_guard<std::mutex> lock(data->mutex);
-        data->condition.notify_one();
+        if (rnode == data->node) {
+            data->completedFrames++;
+            if (!data->alphaNode)
+                data->completedAlphaFrames++;
+        } else {
+            data->completedAlphaFrames++;
+        }
+        if (data->totalFrames == data->completedFrames && data->totalFrames == data->completedAlphaFrames)
+            data->condition.notify_one();
     }
 }
 

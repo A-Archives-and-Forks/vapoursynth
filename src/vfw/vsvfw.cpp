@@ -693,12 +693,12 @@ STDMETHODIMP VapourSynthStream::Info(AVISTREAMINFOW *psi, LONG lSize) noexcept {
 
     if (fAudio) {
         const VSAudioInfo* const ai = parent->ai;
-        size_t bytesPerOutputSample = (ai->format.bitsPerSample + 7) / 8;
+        const size_t blockAlign = ((ai->format.bitsPerSample + 7) / 8) * static_cast<size_t>(ai->format.numChannels);
         asi.fccType = streamtypeAUDIO;
-        asi.dwScale = static_cast<DWORD>(bytesPerOutputSample);
-        asi.dwRate = static_cast<DWORD>(ai->sampleRate * bytesPerOutputSample);
+        asi.dwScale = static_cast<DWORD>(blockAlign);
+        asi.dwRate = static_cast<DWORD>(ai->sampleRate * blockAlign);
         asi.dwLength = static_cast<DWORD>(ai->numSamples);
-        asi.dwSampleSize = static_cast<DWORD>(bytesPerOutputSample);
+        asi.dwSampleSize = static_cast<DWORD>(blockAlign);
         wcscpy(asi.szName, L"VapourSynth Audio #1");
     } else {
         const VSVideoInfo* const vi = parent->vi;

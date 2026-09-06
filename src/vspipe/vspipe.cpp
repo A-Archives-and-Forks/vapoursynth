@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <chrono>
 #include <charconv>
+#include <cmath>
 #include <filesystem>
 #include "../common/wave.h"
 #ifdef VS_TARGET_OS_WINDOWS
@@ -854,18 +855,31 @@ size_t muxAudioFrameSize(const VSFrame *frame, const VSAPI *vsapi) {
     return bytesPerOutputSample * static_cast<size_t>(vsapi->getFrameLength(frame)) * static_cast<size_t>(fi->numChannels);
 }
 
-/* Count of events at some per second rate converted to nanoseconds, with the division split so
-   the intermediate product stays in range: multiplying a large count by a billion first would
-   overflow after a day or two of audio samples. Equal to count * 1000000000 / rate exactly. */
+/* Count of events at some per second rate converted to nanoseconds, equal to
+   count * 1000000000 / rate. The division is split so the intermediate product stays in range
+   for every real rate: multiplying a large count by a billion first would overflow after a day
+   or two of audio samples. A rate past about 9.2e9, which only a contrived rational reaches,
+   overflows the remainder's product too and takes the double route for that part instead:
+   the remainder is below the rate, so the result is under a second and double carries it to
+   well within a nanosecond, at the cost of the last nanosecond being rounded rather than
+   exact. The timecodes file has always been computed in double the same way. */
 int64_t muxRateToNs(int64_t count, int64_t rate) {
-    return (count / rate) * 1000000000LL + ((count % rate) * 1000000000LL) / rate;
+    const int64_t seconds = count / rate;
+    const int64_t remainder = count % rate;
+    if (remainder <= INT64_MAX / 1000000000LL)
+        return seconds * 1000000000LL + (remainder * 1000000000LL) / rate;
+    return seconds * 1000000000LL + static_cast<int64_t>(std::floor(static_cast<double>(remainder) * 1e9 / static_cast<double>(rate)));
 }
 
 /* Exact presentation time of a frame in a constant rate clip. Derived from the frame index rather
    than by adding up a per frame duration, so the rounding of one frame never carries into the
-   next and the last frame of a long clip is as accurate as the first. */
+   next and the last frame of a long clip is as accurate as the first. The index times the
+   denominator fits for every real rate; a denominator so large that it would not, again only a
+   contrived rational, takes the double route for the whole expression. */
 int64_t muxCfrTimeNs(int64_t frameIndex, int64_t fpsNum, int64_t fpsDen) {
-    return muxRateToNs(frameIndex * fpsDen, fpsNum);
+    if (frameIndex == 0 || fpsDen <= INT64_MAX / frameIndex)
+        return muxRateToNs(frameIndex * fpsDen, fpsNum);
+    return static_cast<int64_t>(std::floor(static_cast<double>(frameIndex) * static_cast<double>(fpsDen) / static_cast<double>(fpsNum) * 1e9));
 }
 
 /* Only used for clips with no nominal rate, where the timeline has to be built by accumulating

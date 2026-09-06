@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <cmath>
 
 namespace {
 
@@ -342,7 +343,12 @@ bool MatroskaWriter::initialize(FILE *file, const std::vector<MatroskaTrackInfo>
         if (track.isVideo) {
             ebmlString(entry, idCodecID, "V_UNCOMPRESSED");
             if (track.frameDurationNum > 0 && track.frameDurationDen > 0)
-                ebmlUInt(entry, idDefaultDuration, static_cast<uint64_t>(1000000000LL * track.frameDurationNum / track.frameDurationDen));
+                /* The product overflows only for a numerator past about 9.2e9, a contrived
+                   rational, which takes the double route: the container reads this at
+                   nanosecond scale and double carries a frame duration to far below that. */
+                ebmlUInt(entry, idDefaultDuration, track.frameDurationNum <= INT64_MAX / 1000000000LL
+                    ? static_cast<uint64_t>(1000000000LL * track.frameDurationNum / track.frameDurationDen)
+                    : static_cast<uint64_t>(std::floor(1e9 * static_cast<double>(track.frameDurationNum) / static_cast<double>(track.frameDurationDen))));
 
             EbmlBuffer video;
             ebmlUInt(video, idPixelWidth, static_cast<uint64_t>(track.width));

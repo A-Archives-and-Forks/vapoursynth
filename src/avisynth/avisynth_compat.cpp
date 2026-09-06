@@ -126,8 +126,9 @@ static bool AVSPixelTypeToVSFormat(VSVideoFormat &f, bool &unpack, const VideoIn
     }
 
     if (vi.IsPlanar()) {
-        bool hasSubSampling = vi.IsYUV();
-        unsigned colorFamily = vi.IsYUV() ? cfYUV : (vi.IsRGB() ? cfRGB : (vi.IsY() ? cfGray : 0));
+        const bool gray = vi.IsY();
+        const bool hasSubSampling = !gray && vi.IsYUV();
+        unsigned colorFamily = gray ? cfGray : (vi.IsYUV() ? cfYUV : (vi.IsRGB() ? cfRGB : 0));
         return vsapi->queryVideoFormat(&f, colorFamily, vi.BitsPerComponent() == 32 ? stFloat : stInteger, vi.BitsPerComponent(), hasSubSampling ? vi.GetPlaneWidthSubsampling(PLANAR_U) : 0, hasSubSampling ? vi.GetPlaneHeightSubsampling(PLANAR_U) : 0, core);
     }
 

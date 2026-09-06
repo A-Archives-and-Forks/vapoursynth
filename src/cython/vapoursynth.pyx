@@ -32,6 +32,7 @@ from cpython.number cimport PyIndex_Check
 from cpython.number cimport PyNumber_Index
 from cpython.ref cimport Py_INCREF, Py_DECREF
 import os
+import io
 import enum
 import ctypes
 import traceback
@@ -46,7 +47,7 @@ import functools
 import typing
 import warnings
 import keyword
-from threading import local as ThreadLocal, Condition, Lock, get_ident
+from threading import local as ThreadLocal, Condition, Lock, Thread, get_ident
 from types import MappingProxyType
 from collections.abc import ItemsView, Iterable, KeysView, MutableMapping, ValuesView
 from concurrent.futures import Future, CancelledError as FutureCancelledError, wait as wait_futures
@@ -322,6 +323,11 @@ cdef class EnvironmentData(object):
     cdef object known_nodes
     cdef object known_frames
     cdef object active_futures
+    # thread ident -> frame callbacks of this environment running on that thread, so
+    # destroy_environment can tell when it is called from one of the callbacks it would
+    # otherwise wait for; destroy_deferred records that such a call handed the teardown off
+    cdef dict callback_depth
+    cdef bint destroy_deferred
 
     cdef object __weakref__
 
@@ -522,6 +528,8 @@ cdef class EnvironmentPolicyAPI:
         env.known_nodes = weakref.WeakSet()
         env.known_frames = weakref.WeakSet()
         env.active_futures = weakref.WeakSet()
+        env.callback_depth = {}
+        env.destroy_deferred = False
         env.destroying = False
         env.alive = True
 
@@ -555,6 +563,17 @@ cdef class EnvironmentPolicyAPI:
 
         with env.lock:
             if not env.alive or env.destroying:
+                return
+            if env.callback_depth.get(get_ident(), 0):
+                # Inside one of this environment's own frame callbacks, typically a done
+                # callback of a get_frame_async future. Waiting here for the outstanding
+                # requests would wait for the callback we are in, and the core cannot be freed
+                # from one of its own worker threads either, so a helper thread does the
+                # teardown once this callback has returned. The environment is still alive when
+                # this returns.
+                if not env.destroy_deferred:
+                    env.destroy_deferred = True
+                    Thread(target=self.destroy_environment, args=(env,), name="VapourSynth environment teardown").start()
                 return
             env.destroying = True
 
@@ -1238,6 +1257,25 @@ cdef object _admit_frame_request(EnvironmentData env, EnvironmentData current):
     return fut
 
 
+cdef void writeAll(object fileobj, object data) except *:
+    """Writes the whole of data to fileobj, looping over partial writes: a raw stream may
+    accept fewer bytes than offered, and its return value is the only way to know. A raw
+    stream reporting no progress at all is non-blocking, which output cannot serve; anything
+    else answering None is a duck typed sink that took everything, as such sinks always have."""
+    cdef object view = data if isinstance(data, memoryview) else memoryview(data)
+    cdef Py_ssize_t total = view.nbytes
+    cdef Py_ssize_t done = 0
+    while done < total:
+        n = fileobj.write(view[done:] if done else view)
+        if n is None:
+            if isinstance(fileobj, io.RawIOBase):
+                raise BlockingIOError("output needs a blocking stream, the write accepted nothing")
+            return
+        if n <= 0:
+            raise OSError("write() accepted nothing")
+        done += n
+
+
 cdef class CallbackData(object):
     cdef const VSAPI *funcs
     cdef object callback
@@ -1294,6 +1332,11 @@ cdef void __stdcall frameDoneCallback(void *data, const VSFrame *f, int n, VSNod
     with gil:
         result = error = None
         d = <CallbackData>data
+        env = d.env
+        ident = get_ident()
+        if env is not None:
+            with env.lock:
+                env.callback_depth[ident] = env.callback_depth.get(ident, 0) + 1
 
         try:
             if d.node.node == NULL or d.node.core is None:
@@ -1320,6 +1363,13 @@ cdef void __stdcall frameDoneCallback(void *data, const VSFrame *f, int n, VSNod
                 traceback.print_exc()
         finally:
             d.fut.set_result(None)
+            if env is not None:
+                with env.lock:
+                    depth = env.callback_depth.get(ident, 1) - 1
+                    if depth > 0:
+                        env.callback_depth[ident] = depth
+                    else:
+                        env.callback_depth.pop(ident, None)
             Py_DECREF(d)
 
 cdef object intToRangeFilter(int64_t value, str key):
@@ -2831,9 +2881,9 @@ cdef class VideoNode(RawNode):
                 f"YUV4MPEG2 C{y4mformat} W{self.width} H{self.height} F{self.fps_num}:{self.fps_den} "
                 f"Ip A0:0 XLENGTH={self.num_frames}\n"
             )
-            fileobj.write(data.encode("ascii"))
+            writeAll(fileobj, data.encode("ascii"))
 
-        write = fileobj.write
+        write = functools.partial(writeAll, fileobj)
         total = self.num_frames
 
         cdef:
@@ -3133,7 +3183,7 @@ cdef class AudioNode(RawNode):
             free(interleave_buffer)
             raise Error("Failed to allocate source pointers array")
 
-        write = fileobj.write
+        write = functools.partial(writeAll, fileobj)
 
         # closed explicitly for the same reason as in VideoNode.output
         frame_gen = self.frames(prefetch, backlog, close=True)

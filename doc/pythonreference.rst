@@ -476,6 +476,8 @@ Classes and Functions
       Every frame has to have the dimensions and format the clip declares, and a frame carrying an *_Alpha* property has to carry a single CPU resident frame of the same dimensions and bit depth in it.
       Anything else raises an exception at that frame, and the frames prefetched so far are released with it.
 
+      Writes are completed in full: a raw stream that accepts fewer bytes than offered is written to again with the rest, and a non-blocking raw stream that accepts nothing raises *BlockingIOError*.
+
    .. py:method:: frames([prefetch=None, backlog=None, close=False, collect_garbage=True])
 
       Returns a generator iterator of all VideoFrames in the clip. It will render multiple frames concurrently.
@@ -745,6 +747,8 @@ Classes and Functions
       The current progress can be reported by passing a callback function of the form *func(current_frame, total_frames)* to *progress_update*.
       The *prefetch* argument is only for debugging purposes and should never need to be changed.
       The *backlog* argument is only for debugging purposes and should never need to be changed.
+
+      Writes are completed in full: a raw stream that accepts fewer bytes than offered is written to again with the rest, and a non-blocking raw stream that accepts nothing raises *BlockingIOError*.
 
       Added: R74
 
@@ -1036,6 +1040,7 @@ Classes and Functions
       Either EnvironmentPolicy.is_alive must be overridden or this method be used to mark the environment as destroyed.
 
       Destruction first waits for the frame requests the environment still has outstanding, and refuses any started while it waits with an *Error*.
+      Called from inside a frame callback of the environment itself, such as a done callback of a *get_frame_async* future, it cannot wait there: the teardown is handed to a helper thread and happens once that callback has returned, and the call returns at once with the environment still alive at that moment.
       Afterwards every node, frame, core, plugin and function object that belonged to the environment is invalidated: methods that reach the core raise *Error*, attribute lookups on nodes raise *AttributeError*, comparisons fall back to identity, and representations show the object as invalidated.
 
       Added: R52

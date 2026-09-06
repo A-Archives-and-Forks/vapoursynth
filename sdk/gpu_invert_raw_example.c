@@ -323,9 +323,11 @@ static void VS_CC invertCreate(const VSMap *in, VSMap *out, void *userData, VSCo
     d->vi = *vsapi->getVideoInfo(d->node);
     d->core = core;
 
+    /* Exactly the depths a bitwise complement inverts: at 9 to 15 bits it would flip the
+       unused high bits too and write values past the declared peak. */
     if (d->vi.format.colorFamily == cfUndefined || d->vi.format.sampleType != stInteger ||
-        (d->vi.format.bytesPerSample != 1 && d->vi.format.bytesPerSample != 2)) {
-        vsapi->mapSetError(out, "InvertRawGPU: only constant format 8-16 bit integer clips are supported");
+        (d->vi.format.bitsPerSample != 8 && d->vi.format.bitsPerSample != 16)) {
+        vsapi->mapSetError(out, "InvertRawGPU: only constant format 8 and 16 bit integer clips are supported");
         goto fail;
     }
 

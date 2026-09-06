@@ -1,5 +1,5 @@
 /*
-* GPU filter example: bitwise invert of 8-16 bit integer clips, running entirely on the core's
+* GPU filter example: bitwise invert of 8 and 16 bit integer clips, running entirely on the core's
 * Vulkan device through the public API in VSVulkan4.h, built on the EXECUTION POOL -- the
 * recommended shape for a GPU filter. The pool is the plumbing every submission needs
 * regardless of what it records, and using it reduces a filter's obligations to three:
@@ -200,9 +200,11 @@ static void VS_CC invertCreate(const VSMap *in, VSMap *out, void *userData, VSCo
     d->node = vsapi->mapGetNode(in, "clip", 0, NULL);
     d->vi = *vsapi->getVideoInfo(d->node);
 
+    /* Exactly the depths a bitwise complement inverts: at 9 to 15 bits it would flip the
+       unused high bits too and write values past the declared peak. */
     if (d->vi.format.colorFamily == cfUndefined || d->vi.format.sampleType != stInteger ||
-        (d->vi.format.bytesPerSample != 1 && d->vi.format.bytesPerSample != 2)) {
-        vsapi->mapSetError(out, "InvertGPU: only constant format 8-16 bit integer clips are supported");
+        (d->vi.format.bitsPerSample != 8 && d->vi.format.bitsPerSample != 16)) {
+        vsapi->mapSetError(out, "InvertGPU: only constant format 8 and 16 bit integer clips are supported");
         goto fail;
     }
 

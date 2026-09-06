@@ -210,6 +210,14 @@ struct VSVulkanAllocatorStats {
    in trim() or destroy(); MemoryUse accounts blockBytes, the driver's budget being spent on
    blocks rather than the regions carved from them.
 
+   Known design decision, not an oversight: nothing splits or coalesces, so a mix of long-lived
+   small regions and transient ones of other sizes can pin blocks that trim() cannot return --
+   a 2026-09 audit constructed a case where 144 KiB of live regions kept 1 GiB committed.
+   Graphs in practice reuse a few plane sizes per node and have not shown it. Revisit only if
+   fragmentation is observed to cause allocation failures; the remedies then are ordered free
+   ranges that split and coalesce, or a separate pool for small long-lived allocations, with
+   the exact-size buckets kept as the fast path.
+
    Only buffers live here, which is what makes ignoring bufferImageGranularity legal; images
    keep their dedicated allocations. */
 class VSVulkanAllocator {

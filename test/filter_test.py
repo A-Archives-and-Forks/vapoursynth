@@ -84,6 +84,18 @@ class KernelRegressionTests(unittest.TestCase):
             with clip.get_frame(n) as f:
                 self.assertEqual(len(bytes(f[0])) // f.bytes_per_sample, 3072 if n == 0 else 1)
 
+    @unittest.skipUnless(HAVE_GPU, "no Vulkan device")
+    def test_gpu_resize_frame_matrix_outranks_matrix_in(self):
+        # a special matrix_in kind is a fallback for untagged frames on the GPU path as on the CPU one
+        src = self.core.std.BlankClip(format=vs.YUV444PS, width=8, height=8, color=[0.5, 0.1, 0.2], length=1)
+        src = self.core.std.SetFrameProps(src, _Matrix=1, _Transfer=1, _Primaries=1)
+        for matrix in ("2020cl", "ictcp"):
+            cpu = self.core.resize.Point(src, format=vs.RGBS, matrix_in_s=matrix)
+            gpu = self.core.std.GPUDownload(self.core.resize.Point(self.core.std.GPUUpload(src), format=vs.RGBS, matrix_in_s=matrix))
+            with cpu.get_frame(0) as a, gpu.get_frame(0) as b:
+                for p in range(3):
+                    self.assertAlmostEqual(a[p][0, 0], b[p][0, 0], places=5, msg=matrix)
+
 
 if __name__ == "__main__":
     unittest.main()

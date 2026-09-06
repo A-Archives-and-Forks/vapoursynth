@@ -944,12 +944,12 @@ struct ColourConfig {
     int workInFamily = cfYUV, workOutFamily = cfYUV;
     bool inMatActive = false, outMatActive = false;
 
-    /* MatFrame resolves the frame's own _Matrix, whatever kind of matrix that names --
-       ordinary, constant luminance, chromaticity derived or ICtCp; the argument-named
-       kinds are settled at create. MatFrameSame is an output that re-encodes with the
-       input's per-frame answer, which is what a transfer or gamut change on YUV means. */
+    /* The input matrix is a per-frame answer from _Matrix, whatever kind of matrix that
+       names -- ordinary, constant luminance, chromaticity derived or ICtCp -- with matrix_in
+       standing in for untagged frames, special kinds included, as on the scalar path.
+       MatFrameSame is an output that re-encodes with the input's per-frame answer, which is
+       what a transfer or gamut change on YUV means. */
     enum MatKind { MatFrame, MatFrameSame, MatFixed, MatNclPrim, MatCL2020, MatCLPrim, MatICtCp };
-    MatKind inKind = MatFrame;    /* meaningful when inMatActive */
     MatKind outKind = MatFixed;   /* meaningful when outMatActive */
     int64_t inMatrixFallback = VSC_MATRIX_UNSPECIFIED;   /* matrix_in */
     int64_t outMatrixValue = VSC_MATRIX_RGB;             /* stated; also the tag */
@@ -1241,15 +1241,8 @@ bool resolveColourFrame(const ConversionSpec &spec, const VSMap *props, const VS
        convert on one frame and pass through on the next exactly as it does in zimg. */
     {
         int64_t rawInMat = -1;
-        if (cc.inMatActive) {
-            switch (cc.inKind) {
-            case ColourConfig::MatCL2020: rawInMat = VSC_MATRIX_BT2020_CL; break;
-            case ColourConfig::MatCLPrim: rawInMat = VSC_MATRIX_CHROMATICITY_DERIVED_CL; break;
-            case ColourConfig::MatNclPrim: rawInMat = VSC_MATRIX_CHROMATICITY_DERIVED_NCL; break;
-            case ColourConfig::MatICtCp: rawInMat = VSC_MATRIX_ICTCP; break;
-            default: rawInMat = readProp("_Matrix", VSC_MATRIX_UNSPECIFIED, cc.inMatrixFallback); break;
-            }
-        }
+        if (cc.inMatActive)
+            rawInMat = readProp("_Matrix", VSC_MATRIX_UNSPECIFIED, cc.inMatrixFallback);
         const int64_t rawOutMat = !cc.outMatActive ? -1
             : cc.outKind == ColourConfig::MatFrameSame ? rawInMat : cc.outMatrixValue;
         const bool matSame = !(cc.inMatActive && cc.outMatActive) || rawInMat == rawOutMat;
@@ -1276,23 +1269,16 @@ bool resolveColourFrame(const ConversionSpec &spec, const VSMap *props, const VS
     try {
         /* --- the input matrix, out of YUV or ICtCp */
         if (cc.inMatActive) {
-            ColourConfig::MatKind kind = cc.inKind;
-            int64_t v;
-            switch (kind) {
-            case ColourConfig::MatCL2020: v = VSC_MATRIX_BT2020_CL; break;
-            case ColourConfig::MatCLPrim: v = VSC_MATRIX_CHROMATICITY_DERIVED_CL; break;
-            case ColourConfig::MatNclPrim: v = VSC_MATRIX_CHROMATICITY_DERIVED_NCL; break;
-            case ColourConfig::MatICtCp: v = VSC_MATRIX_ICTCP; break;
-            default:
-                v = readProp("_Matrix", VSC_MATRIX_UNSPECIFIED, cc.inMatrixFallback);
-                if (v == VSC_MATRIX_UNSPECIFIED) {
-                    error = "Resize: this conversion needs a matrix; pass matrix_in or "
-                            "set _Matrix on the frame";
-                    return false;
-                }
-                kind = kindOfValue(v, ColourConfig::MatFrame);
-                break;
+            /* The frame's own _Matrix, matrix_in standing in only when the frame has none:
+               a tagged frame outranks the argument whatever kind either names, exactly as on
+               the scalar path, and a variable-tagged clip may change kind from frame to frame. */
+            int64_t v = readProp("_Matrix", VSC_MATRIX_UNSPECIFIED, cc.inMatrixFallback);
+            if (v == VSC_MATRIX_UNSPECIFIED) {
+                error = "Resize: this conversion needs a matrix; pass matrix_in or "
+                        "set _Matrix on the frame";
+                return false;
             }
+            ColourConfig::MatKind kind = kindOfValue(v, ColourConfig::MatFrame);
             inMatValue = v;
 
             switch (kind) {
@@ -3017,15 +3003,14 @@ bool resolveSpec(const VSMap *in, const char *kernelName, bool deinterlace,
         };
 
         if (cc.inMatActive) {
-            cc.inKind = ColourConfig::MatFrame;
+            /* Whatever kind matrix_in names it is the fallback for frames without _Matrix and
+               nothing more; the frame outranks it, special kinds included, as on the scalar
+               path. Resolved here only so a value this path does not implement declines. */
             if (matrixInArg == ArgLookup::Resolved) {
-                ColourConfig::MatKind k;
-                if (!argKind(matrixInVal, &k))
+                [[maybe_unused]] ColourConfig::MatKind kind;
+                if (!argKind(matrixInVal, &kind))
                     return give_up("a matrix_in this path does not implement");
-                if (k == ColourConfig::MatFixed)
-                    cc.inMatrixFallback = matrixInVal;   /* the frame still outranks it */
-                else
-                    cc.inKind = k;                       /* specials are settled by the argument */
+                cc.inMatrixFallback = matrixInVal;
             }
         } else if (matrixInArg == ArgLookup::Resolved && matrixInVal != VSC_MATRIX_RGB) {
             return give_up("matrix_in names something other than RGB on an RGB source");

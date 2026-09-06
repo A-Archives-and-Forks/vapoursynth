@@ -3,6 +3,7 @@ import gc
 import io
 import multiprocessing
 import threading
+import time
 import unittest
 import weakref
 from concurrent.futures import ProcessPoolExecutor
@@ -788,6 +789,77 @@ class EnvironmentTest(unittest.TestCase):
                 vs.clear_output(3)
                 self.assertNotIn(3, keys)
                 self.assertEqual(vs.get_outputs(), {})
+
+
+class ShortWriteSink(io.RawIOBase):
+    """A raw stream that takes at most seven bytes per write, as a raw file may."""
+
+    def __init__(self):
+        super().__init__()
+        self.data = bytearray()
+
+    def writable(self):
+        return True
+
+    def write(self, b):
+        b = bytes(b)[:7]
+        self.data += b
+        return len(b)
+
+
+class OutputStreamTest(unittest.TestCase):
+    def test_video_output_completes_short_writes(self):
+        clip = vs.core.std.BlankClip(format=vs.GRAY8, width=8, height=8, length=2, color=[7])
+        sink = ShortWriteSink()
+        clip.output(sink)
+        self.assertEqual(bytes(sink.data), bytes([7]) * 128)
+
+    def test_audio_output_completes_short_writes(self):
+        clip = vs.core.std.BlankAudio(channels=[vs.FRONT_LEFT, vs.FRONT_RIGHT], bits=16, length=16)
+        sink = ShortWriteSink()
+        clip.output(sink)
+        self.assertEqual(len(sink.data), 16 * 2 * 2)
+
+
+class DeferredDestroyTest(unittest.TestCase):
+    @subprocess_runner
+    def test_destroy_from_own_frame_callback(self):
+        lock = Lock()
+
+        def modify_func(n, f):
+            with lock:
+                return f
+
+        with _with_policy() as pol:
+            env = pol._api.create_environment()
+            wrapped = pol._api.wrap_environment(env)
+
+            with wrapped.use():
+                core = vs.core.core
+                clip = core.std.BlankClip(width=16, height=16, length=1)
+                clip = core.std.ModifyFrame(clip, clip, modify_func)
+                lock.acquire()
+                fut = clip.get_frame_async(0)
+
+                seen_alive = []
+
+                def dispose(f):
+                    # from inside the environment's own frame callback: the call returns at
+                    # once and hands the teardown to a helper thread
+                    pol._api.destroy_environment(env)
+                    seen_alive.append(wrapped.alive)
+
+                fut.add_done_callback(dispose)
+
+            lock.release()
+            self.assertIsInstance(fut.result(timeout=10), vs.VideoFrame)
+
+            for _ in range(200):
+                if not wrapped.alive:
+                    break
+                time.sleep(0.05)
+            self.assertFalse(wrapped.alive)
+            self.assertEqual(seen_alive, [True])
 
 
 if __name__ == "__main__":

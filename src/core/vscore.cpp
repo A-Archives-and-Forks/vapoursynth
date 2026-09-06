@@ -2343,14 +2343,18 @@ bool VSPlugin::registerFunction(const std::string &name, const std::string &args
 }
 
 VSMap *VSPlugin::invoke(const std::string &funcName, const VSMap &args) {
-    auto it = funcs.find(funcName);
-    if (it != funcs.end()) {
-        return it->second.invoke(args);
-    } else {
-        VSMap *v = new VSMap();
-        vs_internal_vsapi.mapSetError(v, ("Function '" + funcName + "' not found in " + id).c_str());
-        return v;
+    VSPluginFunction *func = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(functionLock);
+        auto it = funcs.find(funcName);
+        if (it != funcs.end())
+            func = &it->second;
     }
+    if (func)
+        return func->invoke(args);
+    VSMap *v = new VSMap();
+    vs_internal_vsapi.mapSetError(v, ("Function '" + funcName + "' not found in " + id).c_str());
+    return v;
 }
 
 VSPluginFunction *VSPlugin::getNextFunction(VSPluginFunction *func) {

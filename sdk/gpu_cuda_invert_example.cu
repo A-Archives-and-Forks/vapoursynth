@@ -1,5 +1,5 @@
 /*
-* GPU filter example: bitwise invert of 8-16 bit integer clips, computed by CUDA on frames
+* GPU filter example: bitwise invert of 8 and 16 bit integer clips, computed by CUDA on frames
 * that live in the core's Vulkan memory. Where gpu_invert_example.c shows a Vulkan compute
 * filter written against the core's own API, this one shows the other species:
 * a filter whose kernels belong to another API entirely, borrowing the frames zero copy.
@@ -416,9 +416,11 @@ static void VS_CC cudaInvertCreate(const VSMap *in, VSMap *out, void *userData, 
     d->node = vsapi->mapGetNode(in, "clip", 0, NULL);
     d->vi = *vsapi->getVideoInfo(d->node);
 
+    /* Exactly the depths a bitwise complement inverts: at 9 to 15 bits it would flip the
+       unused high bits too and write values past the declared peak. */
     if (d->vi.format.colorFamily == cfUndefined || d->vi.format.sampleType != stInteger ||
-        (d->vi.format.bytesPerSample != 1 && d->vi.format.bytesPerSample != 2)) {
-        vsapi->mapSetError(out, "InvertCUDA: only constant format 8-16 bit integer clips are supported");
+        (d->vi.format.bitsPerSample != 8 && d->vi.format.bitsPerSample != 16)) {
+        vsapi->mapSetError(out, "InvertCUDA: only constant format 8 and 16 bit integer clips are supported");
         goto fail;
     }
 

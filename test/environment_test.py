@@ -861,6 +861,49 @@ class DeferredDestroyTest(unittest.TestCase):
             self.assertFalse(wrapped.alive)
             self.assertEqual(seen_alive, [True])
 
+    @subprocess_runner
+    def test_destroy_caller_environment_from_frame_callback(self):
+        # a node of one environment requested while another is current: the callback runs in
+        # the caller's environment, and destroying that one from inside it must defer as well
+        lock = Lock()
+
+        def modify_func(n, f):
+            with lock:
+                return f
+
+        with _with_policy() as pol:
+            owner = pol._api.create_environment()
+            caller = pol._api.create_environment()
+            wrapped_caller = pol._api.wrap_environment(caller)
+
+            with pol._api.wrap_environment(owner).use():
+                core = vs.core.core
+                clip = core.std.BlankClip(width=16, height=16, length=1)
+                clip = core.std.ModifyFrame(clip, clip, modify_func)
+
+            with wrapped_caller.use():
+                lock.acquire()
+                fut = clip.get_frame_async(0)
+
+                seen_alive = []
+
+                def dispose(f):
+                    pol._api.destroy_environment(caller)
+                    seen_alive.append(wrapped_caller.alive)
+
+                fut.add_done_callback(dispose)
+
+            lock.release()
+            self.assertIsInstance(fut.result(timeout=10), vs.VideoFrame)
+
+            for _ in range(200):
+                if not wrapped_caller.alive:
+                    break
+                time.sleep(0.05)
+            self.assertFalse(wrapped_caller.alive)
+            self.assertEqual(seen_alive, [True])
+            pol._api.destroy_environment(owner)
+
 
 if __name__ == "__main__":
     unittest.main()

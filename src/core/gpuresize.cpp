@@ -3007,7 +3007,7 @@ bool resolveSpec(const VSMap *in, const char *kernelName, bool deinterlace,
                nothing more; the frame outranks it, special kinds included, as on the scalar
                path. Resolved here only so a value this path does not implement declines. */
             if (matrixInArg == ArgLookup::Resolved) {
-                [[maybe_unused]] ColourConfig::MatKind kind;
+                ColourConfig::MatKind kind;
                 if (!argKind(matrixInVal, &kind))
                     return give_up("a matrix_in this path does not implement");
                 cc.inMatrixFallback = matrixInVal;

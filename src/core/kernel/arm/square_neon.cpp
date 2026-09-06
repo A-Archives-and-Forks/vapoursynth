@@ -44,6 +44,7 @@
 
 #include <cstdint>
 #include "../generic.h"
+#include "../square_common.h"
 #include "neon_common.h"
 
 namespace {
@@ -363,19 +364,6 @@ unsigned sq_interior_half(const uint16_t *const *rows, uint16_t *dst, unsigned S
     for (; j + 16 <= end; j += 16) block(j);
     if (j < end && end >= S + 16) { block(end - 16); j = end; }
     return j;
-}
-
-// Whether an N*N word convolution can run in the int32 path: the biased tap products reach
-// 32768 * |m| whatever the depth, and the debiased sum reaches maxval * |m|, so the larger of
-// the two times the coefficient magnitudes has to stay below 2^31. Always true up to 5x5 with
-// the +-1023 coefficient limit, never at 9x9 and up, and a property of the matrix at 7x7.
-template <unsigned N>
-static bool sq_word_fits_i32(const int16_t *m, unsigned maxval)
-{
-    int64_t sum = 0;
-    for (unsigned i = 0; i < N * N; ++i)
-        sum += m[i] < 0 ? -static_cast<int64_t>(m[i]) : static_cast<int64_t>(m[i]);
-    return sum * static_cast<int64_t>(maxval < 32768 ? 32768 : maxval) <= INT32_MAX;
 }
 
 // ---- plane driver: scalar mirror edges + SIMD interior ----

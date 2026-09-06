@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <type_traits>
 #include "../generic.h"
+#include "../square_common.h"
 
 namespace {
 
@@ -271,20 +272,6 @@ static unsigned sq_interior_float(const float *const *rows, float *dst, unsigned
     // Float uses FMA, so these columns now match the SIMD interior rather than the non-FMA scalar tail.
     if (j < end && end >= S + STEP) { block(end - STEP); j = end; }
     return j;
-}
-
-// Whether an N*N word convolution can run in the int32 path: the biased tap products reach
-// 32768 * |m| whatever the depth, and the debiased sum reaches maxval * |m|, so the larger of
-// the two times the coefficient magnitudes has to stay below 2^31. Always true up to 5x5 with
-// the +-1023 coefficient limit, never at 9x9 and up, and a property of the matrix at 7x7,
-// where 49 taps of 1023 on 16 bit samples reach 3.3e9 and wrapped the interior to black.
-template <unsigned N>
-static bool sq_word_fits_i32(const int16_t *m, unsigned maxval)
-{
-    int64_t sum = 0;
-    for (unsigned i = 0; i < N * N; ++i)
-        sum += m[i] < 0 ? -static_cast<int64_t>(m[i]) : static_cast<int64_t>(m[i]);
-    return sum * static_cast<int64_t>(maxval < 32768 ? 32768 : maxval) <= INT32_MAX;
 }
 
 // ---- plane driver: scalar edges + SIMD interior ----

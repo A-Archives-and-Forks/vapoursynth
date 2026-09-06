@@ -501,26 +501,49 @@ VSClip::VSClip(VSNode *inclip, FakeAvisynth *fakeEnv, bool pack, const VSAPI *vs
     vi.sample_type = SAMPLE_INT16;
 }
 
-static VideoFrame *newFrameView(const VSFrame *frame, bool writable, const VSAPI *vsapi) {
+/* Builds the AviSynth view over a frame whose plane pointers the caller already fetched: G, B, R
+   order for RGB, matching VideoFrame::GetOffset, plane order for everything else; a single
+   plane frame leaves the secondary slots empty. */
+static VideoFrame *buildFrameView(const VSFrame *frame, bool writable, const uint8_t *const planes[3], const VSAPI *vsapi) {
     const VSVideoFormat *f = vsapi->getVideoFrameFormat(frame);
     const bool rgb = f->colorFamily == cfRGB;
     const int base = rgb ? 1 : 0;
     const int second = rgb ? 2 : 1;
     const int third = rgb ? 0 : 2;
     const bool multiplePlanes = f->numPlanes == 3;
-    const uint8_t *basePtr = vsapi->getReadPtr(frame, base);
     return new VideoFrame(
-        (BYTE *)basePtr,
+        (BYTE *)planes[base],
         writable,
         0,
         static_cast<int>(vsapi->getStride(frame, base)),
         vsapi->getFrameWidth(frame, base) * f->bytesPerSample,
         vsapi->getFrameHeight(frame, base),
-        multiplePlanes ? vsapi->getReadPtr(frame, second) - basePtr : 0,
-        multiplePlanes ? vsapi->getReadPtr(frame, third) - basePtr : 0,
+        multiplePlanes ? planes[second] - planes[base] : 0,
+        multiplePlanes ? planes[third] - planes[base] : 0,
         multiplePlanes ? static_cast<int>(vsapi->getStride(frame, second)) : 0,
         multiplePlanes ? vsapi->getFrameWidth(frame, second) * f->bytesPerSample : 0,
         multiplePlanes ? vsapi->getFrameHeight(frame, second) : 0);
+}
+
+/* A view the plugin only reads through. */
+static VideoFrame *newReadView(const VSFrame *frame, const VSAPI *vsapi) {
+    const uint8_t *planes[3] = {};
+    const int numPlanes = vsapi->getVideoFrameFormat(frame)->numPlanes;
+    for (int p = 0; p < numPlanes; p++)
+        planes[p] = vsapi->getReadPtr(frame, p);
+    return buildFrameView(frame, false, planes, vsapi);
+}
+
+/* A view the plugin writes through. The frame's planes may still be shared with the frame it
+   was copied from -- MakeWritable copies with copyFrame, which is copy on write -- and only
+   getWritePtr detaches them, reallocating the plane as it does, so every plane goes through it
+   before any pointer is kept. */
+static VideoFrame *newWritableView(VSFrame *frame, const VSAPI *vsapi) {
+    const uint8_t *planes[3] = {};
+    const int numPlanes = vsapi->getVideoFrameFormat(frame)->numPlanes;
+    for (int p = 0; p < numPlanes; p++)
+        planes[p] = vsapi->getWritePtr(frame, p);
+    return buildFrameView(frame, true, planes, vsapi);
 }
 
 PVideoFrame VSClip::GetFrame(int n, IScriptEnvironment *env) {
@@ -546,7 +569,7 @@ PVideoFrame VSClip::GetFrame(int n, IScriptEnvironment *env) {
     if (!ref)
         vsapi->logMessage(mtFatal, ("Avisynth Compat: error while getting input frame synchronously: "s + buf.data()).c_str(), fakeEnv->core);
 
-    VideoFrame *vfb = newFrameView(ref, false, vsapi);
+    VideoFrame *vfb = newReadView(ref, vsapi);
     PVideoFrame pvf(vfb);
     fakeEnv->ownedFrames.insert(std::make_pair(vfb, ref));
     return pvf;
@@ -1056,7 +1079,7 @@ PVideoFrame FakeAvisynth::NewVideoFrame(const VideoInfo &vi, int align) {
     if (propSrc)
         vsapi->freeFrame(propSrc);
 
-    VideoFrame *vfb = newFrameView(ref, true, vsapi);
+    VideoFrame *vfb = newWritableView(ref, vsapi);
     PVideoFrame pvf(vfb);
     ownedFrames.insert(std::make_pair(vfb, ref));
     return pvf;
@@ -1068,7 +1091,7 @@ bool FakeAvisynth::MakeWritable(PVideoFrame *pvf) {
     auto it = ownedFrames.find(vfb);
     assert(it != ownedFrames.end());
     VSFrame *ref = vsapi->copyFrame(it->second, core);
-    VideoFrame *newVfb = newFrameView(ref, true, vsapi);
+    VideoFrame *newVfb = newWritableView(ref, vsapi);
     *pvf = PVideoFrame(newVfb);
     ownedFrames.insert(std::make_pair(newVfb, ref));
     return true;

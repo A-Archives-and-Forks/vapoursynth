@@ -1328,15 +1328,35 @@ cdef FramePtr createFramePtr(const VSFrame *f, const VSAPI *funcs):
     return instance
 
 
+cdef void _enter_frame_callback(EnvironmentData env, object ident) except *:
+    with env.lock:
+        env.callback_depth[ident] = env.callback_depth.get(ident, 0) + 1
+
+
+cdef void _leave_frame_callback(EnvironmentData env, object ident) except *:
+    with env.lock:
+        depth = env.callback_depth.get(ident, 1) - 1
+        if depth > 0:
+            env.callback_depth[ident] = depth
+        else:
+            env.callback_depth.pop(ident, None)
+
+
 cdef void __stdcall frameDoneCallback(void *data, const VSFrame *f, int n, VSNode *node, const char *errormsg) noexcept nogil:
     with gil:
         result = error = None
         d = <CallbackData>data
         env = d.env
+        caller_env = d.caller_env
+        # Both environments that admitted the request hold d.fut in their active_futures and
+        # would wait on it: the node's, and the caller's the callback runs in when that is a
+        # different one. Each has to know it is inside this callback for destroy_environment
+        # to defer instead of waiting for the very callback it was called from.
         ident = get_ident()
         if env is not None:
-            with env.lock:
-                env.callback_depth[ident] = env.callback_depth.get(ident, 0) + 1
+            _enter_frame_callback(env, ident)
+        if caller_env is not None and caller_env is not env:
+            _enter_frame_callback(caller_env, ident)
 
         try:
             if d.node.node == NULL or d.node.core is None:
@@ -1364,12 +1384,9 @@ cdef void __stdcall frameDoneCallback(void *data, const VSFrame *f, int n, VSNod
         finally:
             d.fut.set_result(None)
             if env is not None:
-                with env.lock:
-                    depth = env.callback_depth.get(ident, 1) - 1
-                    if depth > 0:
-                        env.callback_depth[ident] = depth
-                    else:
-                        env.callback_depth.pop(ident, None)
+                _leave_frame_callback(env, ident)
+            if caller_env is not None and caller_env is not env:
+                _leave_frame_callback(caller_env, ident)
             Py_DECREF(d)
 
 cdef object intToRangeFilter(int64_t value, str key):

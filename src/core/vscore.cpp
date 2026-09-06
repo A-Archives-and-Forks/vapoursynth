@@ -2054,6 +2054,8 @@ void VSCore::freeCore() {
         logFatal("Double free of core");
     coreFreed = true;
     threadPool->waitForDone();
+    if (vulkanTrans)
+        vulkanTrans->releaseIdle(std::chrono::steady_clock::duration::zero());
     if (numFilterInstances > 1)
         logMessage(mtWarning, "Core freed but " + safe_to_string(numFilterInstances.load() - 1) + " filter instance(s) still exist");
     if (memory->allocated_bytes())

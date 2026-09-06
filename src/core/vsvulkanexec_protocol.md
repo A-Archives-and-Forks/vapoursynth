@@ -98,7 +98,10 @@ only after that, from a local list, with no lock held.
 
 Every batch of releases is registered on the device for as long as it runs, as `{pool, thread,
 id}`, whichever reaper runs it; `acquire` registers from the moment it wins the claim, because
-from then on no sweep can reach that context. The waits built on the registry:
+from then on no sweep can reach that context. Both sweeps register while still holding
+`execPoolsMutex`, in the same critical section that detached the retentions, so there is no
+moment at which they belong to neither a context nor a batch -- which a concurrent `waitAll`
+would read as "everything has been released". The waits built on the registry:
 
 | Wait | Waits for | Bound | Own-thread batch for the pool |
 |---|---|---|---|

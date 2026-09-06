@@ -194,6 +194,10 @@ struct VSVulkanDeviceInfo {
 
 class VSVulkanDevice;
 class VSVulkanExecPool;
+/* One retained object and its release function, defined with the exec pool that owns them.
+   Named here only through a reference, so the device can hand a detached batch back to
+   whichever thread is going to run it. */
+struct VSVulkanExecRetained;
 
 struct VSVulkanAllocatorStats {
     uint64_t blockCount = 0;
@@ -566,6 +570,13 @@ public:
        the waits well defined even where the checks above cannot see a violation. */
     void registerExecPool(VSVulkanExecPool *pool);
     void unregisterExecPool(VSVulkanExecPool *pool);
+    /* Detaches one pool's completed retentions and registers the batch that now owns them
+       without dropping the registry lock in between, which is what keeps them from being
+       invisible: a sweeper or a waiter looking at any moment finds them either still on the
+       contexts or already named by a batch. Returns false when there was nothing to detach,
+       in which case no batch exists and endExecReleases must not be called. The device-wide
+       sweep does the same for every pool at once. */
+    bool detachExecReleases(VSVulkanExecPool *pool, std::vector<VSVulkanExecRetained> &out);
     void beginExecReleases(VSVulkanExecPool *pool);
     void endExecReleases(VSVulkanExecPool *pool);
     void waitExecReleases(VSVulkanExecPool *pool);

@@ -194,11 +194,15 @@ bool VSVulkanExecPool::init(VSVulkanDevice &device, VSVulkanQueue &queue, uint32
 }
 
 void VSVulkanExecPool::sweepCompleted() {
+    /* Detaching and registering the batch happen together under the device's registry lock.
+       Doing them in two steps left a window in which the retentions had left their contexts
+       and no batch named them yet, so another thread's waitAll -- which sweeps, finds nothing,
+       and then waits for the batches in flight -- could return promising that everything was
+       released while this thread still held them. Nothing is registered when there was nothing
+       to take, so an idle pool's sweep costs one lock and no bookkeeping. */
     std::vector<VSVulkanExecRetained> detached;
-    detachCompleted(detached);
-    if (detached.empty())
+    if (!dev->detachExecReleases(this, detached))
         return;
-    dev->beginExecReleases(this);
     runReleases(detached);
     dev->endExecReleases(this);
 }

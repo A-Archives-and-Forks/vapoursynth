@@ -432,9 +432,13 @@ def run_gpu():
              range_in_s="full", range_s="limited", refargs={"full_in": True, "full_out": False})
     fmt_case("420P8 limited->full 1:1", vs.YUV420P8, "Bicubic", 640, 360, 60.0, 1.0, seed=38,
              range_s="full", refargs={"full_in": False, "full_out": True})
+    # YCgCo's 219 chroma span applies only while the colorspace operation is active, and a
+    # conversion that leaves the matrix alone clears it, so the ordinary 224 span is what both
+    # implementations use here. The model is called the same way; measured 2026-09-06, CPU and
+    # GPU agree to the last integer on this case, so the ycgco refarg was the wrong reference.
     fmt_case("420P8 ycgco range 1:1", vs.YUV420P8, "Bicubic", 640, 360, 60.0, 1.0, seed=39,
              range_s="full", props={"_Matrix": 8},
-             refargs={"full_in": False, "full_out": True, "ycgco": True})
+             refargs={"full_in": False, "full_out": True})
 
     # Siting: the frame's word, the argument's fallback, and a stated output location --
     # including the chromaloc-only change, where luma must pass through untouched.
@@ -668,27 +672,24 @@ def run_gpu():
     pb = noise_planes(core.get_video_format(vs.GRAYS), 320, 180, seed=121)
     pb = [np.ascontiguousarray(p, np.float32).astype(np.float64) for p in pb]
     var = core.std.Splice([make_clip(pa, vs.GRAY8), make_clip(pb, vs.GRAYS)], mismatch=True)
-    with LogCatcher() as log:
-        gv = core.std.GPUDownload(core.resize.Bicubic(core.std.GPUUpload(var), width=480, height=270))
-        gout = []
-        for nf in (0, 1):
-            with gv.get_frame(nf) as f:
-                gout.append((np.asarray(f[0]).astype(np.float64), f.format.id))
-        vdecl = log.declines()
+    # A variable format or variable dimension clip has no GPU path, by decision (2026-08-05):
+    # every GPU filter requires a constant format and constant dimensions, and a decline is an
+    # error naming the remedy rather than a silent fallback. What is checked is that the refusal
+    # happens and reads clearly, and that the scalar path still resizes the same clip.
+    vmsg = "no error"
+    try:
+        core.resize.Bicubic(core.std.GPUUpload(var), width=480, height=270)
+        vok = False
+    except vs.Error as e:
+        vmsg = " ".join(str(e).split())
+        vok = "does not implement" in vmsg and "GPUDownload" in vmsg
     sv = core.resize.Bicubic(var, width=480, height=270)
-    vok = not vdecl
-    vworst = float("inf")
     for nf in (0, 1):
         with sv.get_frame(nf) as f:
-            want = np.asarray(f[0]).astype(np.float64)
-            vok = vok and f.format.id == gout[nf][1]
-            vworst = min(vworst, ref.accuracy_db(want, gout[nf][0], peak_of(f.format)))
-    # The 8-bit frame is measured against the scalar path's integer chain, whose
-    # quantised, clipped intermediate sits tens of dB from the float model by design.
-    vok = vok and vworst >= 55.0
-    results.append(("variable format per-frame specs", vworst, None, vok))
+            vok = vok and f.width == 480 and f.height == 270
+    results.append(("variable format refused on the GPU", float("nan"), None, vok))
     if not vok:
-        failures.append("variable format per-frame specs  [declines=%r]" % vdecl)
+        failures.append("variable format refused on the GPU  [%s]" % vmsg[:110])
 
     # The white patch pin from the previous round: a 709 -> 470M primaries conversion
     # WITHOUT white point adaptation returns off-white, and matching the scalar path's
@@ -754,19 +755,34 @@ GPU_FLOOR_DB = 130.0
 def run_audit():
     failures = []
 
-    def declines(label, clip, expect_reason, scalar_may_error=False, **kw):
-        """The GPU hook must hand the call back with the expected reason; the scalar
-        fallback then either answers it or -- for calls that are invalid everywhere --
-        raises its own error, which is the correct behaviour too."""
+    def refuses(label, clip, expect_reason, **kw):
+        """What the GPU path does not implement is refused with an error naming the reason and
+        the remedy. It does not fall back to the CPU behind the caller's back and it logs
+        nothing: that policy replaced the silent download on 2026-08-05, so a decline message
+        appearing here would itself be the defect."""
         with LogCatcher() as log:
             try:
-                out = core.std.GPUDownload(core.resize.Bicubic(core.std.GPUUpload(clip), **kw))
-                out.get_frame(0)
+                core.std.GPUDownload(core.resize.Bicubic(core.std.GPUUpload(clip), **kw)).get_frame(0)
                 err = None
             except vs.Error as e:
-                err = str(e)
+                err = " ".join(str(e).split())
             d = log.declines()
-        ok = len(d) == 1 and expect_reason in d[0] and (scalar_may_error or err is None)
+        ok = err is not None and expect_reason in err and "GPUDownload" in err and not d
+        print(f"  {label:<48}  {'ok' if ok else 'FAIL  err=%r declines=%r' % (err, d)}")
+        if not ok:
+            failures.append(label)
+
+    def handled(label, clip, **kw):
+        """Arguments the GPU path does implement: the frame comes back with no error and
+        nothing declined."""
+        with LogCatcher() as log:
+            try:
+                core.std.GPUDownload(core.resize.Bicubic(core.std.GPUUpload(clip), **kw)).get_frame(0)
+                err = None
+            except vs.Error as e:
+                err = " ".join(str(e).split())
+            d = log.declines()
+        ok = err is None and not d
         print(f"  {label:<48}  {'ok' if ok else 'FAIL  err=%r declines=%r' % (err, d)}")
         if not ok:
             failures.append(label)
@@ -790,18 +806,17 @@ def run_audit():
     y8 = core.std.BlankClip(format=vs.YUV420P8, width=640, height=360, length=1)
     rgbs = core.std.BlankClip(format=vs.RGBS, width=640, height=360, length=1)
 
-    declines("error diffusion dither", g8, "error diffusion", width=320, height=180,
-             dither_type="error_diffusion")
-    declines("cpu_type", gs, "cpu_type", width=320, height=180, cpu_type="avx2")
-    # The _in-alone spellings fall to the plain path, whose whole-argument decline is the
-    # same answer the previous implementation gave.
-    declines("transfer_in alone", rgbs, "colorspace conversion", transfer_in_s="709")
-    declines("primaries_in alone", rgbs, "colorspace conversion", primaries_in_s="709")
-    declines("gray transfer no RGB", gs, "pass through RGB", scalar_may_error=True,
-             transfer_in_s="709", transfer_s="linear")
-    declines("32 bit integer", core.std.BlankClip(format=core.query_video_format(
-        vs.GRAY, vs.INTEGER, 32).id, width=64, height=64, length=1), "wider than 16 bit",
-        scalar_may_error=True)
+    refuses("error diffusion dither", g8, "error diffusion", width=320, height=180,
+            dither_type="error_diffusion")
+    refuses("cpu_type", gs, "cpu_type", width=320, height=180, cpu_type="avx2")
+    # An _in-alone spelling names the source's own tagging and asks for no conversion, which
+    # the GPU path implements; it used to be refused along with the whole colour argument set.
+    handled("transfer_in alone", rgbs, transfer_in_s="709")
+    handled("primaries_in alone", rgbs, primaries_in_s="709")
+    refuses("gray transfer no RGB", gs, "pass through RGB",
+            transfer_in_s="709", transfer_s="linear")
+    refuses("32 bit integer", core.std.BlankClip(format=core.query_video_format(
+        vs.GRAY, vs.INTEGER, 32).id, width=64, height=64, length=1), "wider than 16 bit")
 
     # chromatic_adaptation is accepted and ignored, matching the scalar path's real
     # behaviour at zimg API 2.4; the white patch pin guards both against it turning on.

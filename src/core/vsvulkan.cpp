@@ -1179,6 +1179,16 @@ void VSVulkanDevice::unregisterExecPool(VSVulkanExecPool *pool) {
     execReleaseCv.wait(lock, [this, pool]() { return !execReleasesPending(pool, UINT64_MAX); });
 }
 
+bool VSVulkanDevice::detachExecReleases(VSVulkanExecPool *pool, std::vector<VSVulkanExecRetained> &out) {
+    std::lock_guard<std::mutex> lock(execPoolsMutex);
+    const size_t before = out.size();
+    pool->detachCompleted(out);
+    if (out.size() == before)
+        return false;
+    execReleasesInFlight.push_back({ pool, std::this_thread::get_id(), nextExecReleaseBatch++ });
+    return true;
+}
+
 void VSVulkanDevice::beginExecReleases(VSVulkanExecPool *pool) {
     std::lock_guard<std::mutex> lock(execPoolsMutex);
     execReleasesInFlight.push_back({ pool, std::this_thread::get_id(), nextExecReleaseBatch++ });

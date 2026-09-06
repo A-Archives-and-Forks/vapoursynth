@@ -250,9 +250,8 @@ struct VSPipeOutputData {
     /* Buffer used to interleave audio or to pack together video where the rowsize isn't the same as pitch due to multiple calls to stdout being very slow */
     std::vector<uint8_t> buffer;
 
-    /* Statistics */
     bool printProgress = false;
-    std::chrono::time_point<std::chrono::steady_clock> startTime;
+    std::chrono::time_point<std::chrono::steady_clock> startTime = std::chrono::steady_clock::now();
     std::chrono::time_point<std::chrono::steady_clock> lastFPSReportTime;
 
     /* Timecode output */
@@ -2065,11 +2064,14 @@ int main(int argc, char **argv) {
             success = false;
 
         std::chrono::duration<double> elapsedSeconds = std::chrono::steady_clock::now() - data->startTime;
+        const int writtenFrames = data->outputFrames;
         if (opts.mode == VSPipeMode::Output) {
             if (vsapi->getNodeType(node) == mtVideo)
-                fprintf(stderr, "Output %d frames in %.2f seconds (%.2f fps)\n", data->totalFrames, elapsedSeconds.count(), data->totalFrames / elapsedSeconds.count());
+                fprintf(stderr, "Output %d frames in %.2f seconds (%.2f fps)\n", writtenFrames, elapsedSeconds.count(), writtenFrames / elapsedSeconds.count());
             else
-                fprintf(stderr, "Output %" PRId64 " samples in %.2f seconds (%.2f sps)\n", data->totalSamples, elapsedSeconds.count(), (data->totalFrames / elapsedSeconds.count()) * VS_AUDIO_FRAME_SAMPLES);
+                fprintf(stderr, "Output %" PRId64 " samples in %.2f seconds (%.2f sps)\n",
+                    std::min(static_cast<int64_t>(writtenFrames) * VS_AUDIO_FRAME_SAMPLES, data->totalSamples),
+                    elapsedSeconds.count(), (writtenFrames / elapsedSeconds.count()) * VS_AUDIO_FRAME_SAMPLES);
         }
 
         if (opts.printFilterTime)

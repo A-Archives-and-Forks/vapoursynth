@@ -1878,6 +1878,7 @@ void VSCore::filterInstanceDestroyed() noexcept {
 struct VSCoreShittyFreeList {
     VSFilterFree freeFunc;
     void *instanceData;
+    VSCore *core;
     VSCoreShittyFreeList *next;
 };
 
@@ -1890,7 +1891,7 @@ void VSCore::destroyFilterInstance(VSNode *node) {
         freedNodeProcessingTime += node->processingTime;
 
     if (node->freeFunc) {
-        nodeFreeList = new VSCoreShittyFreeList({ node->freeFunc, node->instanceData, nodeFreeList });
+        nodeFreeList = new VSCoreShittyFreeList({ node->freeFunc, node->instanceData, this, nodeFreeList });
     } else {
         filterInstanceDestroyed();
     }
@@ -1899,9 +1900,10 @@ void VSCore::destroyFilterInstance(VSNode *node) {
         while (nodeFreeList) {
             VSCoreShittyFreeList *current = nodeFreeList;
             nodeFreeList = current->next;
-            current->freeFunc(current->instanceData, this, &vs_internal_vsapi);
+            VSCore *owner = current->core;
+            current->freeFunc(current->instanceData, owner, &vs_internal_vsapi);
             delete current;
-            filterInstanceDestroyed();
+            owner->filterInstanceDestroyed();
         }
     }
 

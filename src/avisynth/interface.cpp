@@ -537,7 +537,8 @@ BYTE* VideoFrame::GetWritePtr(int plane) const {
 /* Baked ********************
 VideoFrame::~VideoFrame() { InterlockedDecrement(&vfb->refcount); }
    Baked ********************/
-VideoFrame::~VideoFrame()     { DESTRUCTOR(); }
+
+VideoFrame::~VideoFrame()     { DESTRUCTOR(); delete vfb; }
 void VideoFrame::DESTRUCTOR() { Release(); }
 
 // end class VideoFrame

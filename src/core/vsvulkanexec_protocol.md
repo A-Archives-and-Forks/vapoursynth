@@ -8,7 +8,7 @@ every change must keep. The public contract it describes is the one in `VSVulkan
 two disagree, the header is what plugins were promised and this file is what needs fixing.
 
 Verified against the tree of 2026-09-05 (the release-batch registry with sequence numbers and
-the enforced rules I15 to I23). Section 11 lists invariants that are *not* enforced yet and
+the enforced rules I15 to I24). Section 11 lists invariants that are *not* enforced yet and
 what each would rule out.
 
 ## 1. Objects and ownership
@@ -192,6 +192,7 @@ rung 1 waits.
 | I21 | Every metered byte belongs to a submission whose completion signals the progress timeline. | `retain` adds bytes only on a pool with `signalsProgress` |
 | I22 | A context handle is usable exactly from its acquire to the submit or abandon that ends it; any later use is fatal, never a read of freed memory. | the handle lives in the ring slot, bound once at creation; every public entry point runs `failUnlessOwner` first, whose empty-owner case names an ended recording; the wrapper moves the handle's lists out before `submit` drops the claim |
 | I23 | A producer pair naming a pool's timeline never carries a value the pool has not submitted. | `noteSubmitted` under the queue lock at submit, before the caller can learn the value; the check in `setPlaneProducer`; timelines from `createGPUTimeline` are not pool-owned and exempt |
+| I24 | A GPU plane's buffer returns to the allocator only after its producer pair is reached, after the core is freed as before it. | `~VSPlaneData` waits unconditionally; the plane's counted timeline reference keeps the pair valid; every pool drains before `onCoreFreed`, so for a pool's timeline that wait is already satisfied by then |
 
 ## 10. Known windows and their bounds
 
@@ -208,9 +209,10 @@ own recording. W3 is gone with I21. W6 is what the gate's poll now exists for.
 
 P1 to P4 of the earlier revision are now I15 to I18, P6 and P9 are I19 and I20, P5 is I21 (as
 "not metered" rather than fatal, since the typed calls count bytes on their own and a transfer
-pool that copies GPU frames has to read them), and P11 and P12 are I22 and I23. Each of the rest
-would delete a further class of interleavings from what must be reasoned about; P13 is a design
-change, the others are cheap.
+pool that copies GPU frames has to read them), P11 and P12 are I22 and I23, and P17 is I24 (the
+skip it removed dated from timelines dying with their pools, before they were counted). Each of
+the rest would delete a further class of interleavings from what must be reasoned about; P13 is
+a design change, the others are cheap.
 
 | # | Candidate | Enforce by | Eliminates |
 |---|---|---|---|
@@ -221,7 +223,6 @@ change, the others are cheap.
 | P14 | A thread waiting for a claim on one pool holds no context of a pool created after it. | on acquire's slow path only, walk the registry for contexts owned by this thread and fail on a later pool; or size the ring to the worker count so workers never wait | cross-pool circular waits when rings are full |
 | P15 | A producer is published only on a plane whose plane data is unique. | fatal in both publication paths when `VSPlaneData::unique()` is false | a filter writing into a copied GPU frame, which shares plane data and corrupts the original silently |
 | P16 | After device loss every wait returns an error, every retention is still released once, and destruction completes. | nothing in code; a probe that forces a driver timeout with an infinite shader loop, then exercises acquire, `waitAll` and free | the unverified assumption behind every unbounded wait |
-| P17 | When the core is freed, no live frame names a pending producer. | stop skipping the producer wait in `~VSPlaneData` once the core is gone, or record why the skip is safe | a buffer destroyed under a foreign API's pending access after teardown |
 
 With I15 to I18 in place callbacks are pure frees and every rendezvous is unambiguous, which
 is the shape a single-reaper design would enforce structurally; that later change, if wanted,

@@ -133,9 +133,14 @@ VSPlaneData::VSPlaneData(const VSPlaneData &d) noexcept : refcount(1), mem(d.mem
 
 VSPlaneData::~VSPlaneData() {
     if (gpu) {
-        /* The producer may still be writing this plane so wait for it */
-        if (!gpuDevice->coreFreed())
-            waitPlaneHost(*gpuDevice, *gpu);
+        /* The producer may still be writing this plane, so wait for it before the buffer goes
+           back to the allocator, after the core as much as before it: the plane holds its own
+           reference on the producer's timeline, so the pair is never dangling, and every pool
+           drains before the core's device reference goes, so for a pool's timeline the wait is
+           already satisfied by then. What remains is a timeline a filter signals itself, whose
+           pending work would otherwise still be writing a buffer that was just handed back
+           (invariant I24). */
+        waitPlaneHost(*gpuDevice, *gpu);
         gpuDevice->destroyBuffer(gpu->buffer);
         delete gpu; /* releases the plane's timeline reference */
         /* Buffer before device: returning the region keeps MemoryUse alive until this point,

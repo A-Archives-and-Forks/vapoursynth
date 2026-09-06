@@ -27,12 +27,13 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <vector>
 
 namespace vs {
 
 // Memory allocation policy. Tracks all framebuffer allocations within a Core.
 class MemoryUse {
-    typedef std::multimap<size_t, uint8_t *> freelist_type;
+    typedef std::map<size_t, std::vector<uint8_t *>> freelist_type;
 
     struct DebugStats;
 
@@ -43,6 +44,7 @@ class MemoryUse {
 
     std::mutex m_mutex;
     freelist_type m_freelist;
+    size_t m_freelist_count = 0;
     std::minstd_rand m_prng;
     DebugStats *m_debug_stats = nullptr;
 

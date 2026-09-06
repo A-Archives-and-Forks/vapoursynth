@@ -1,3 +1,4 @@
+import gc
 import os
 import subprocess
 import sys
@@ -191,6 +192,56 @@ class KernelRegressionTests(unittest.TestCase):
             self.assertNotEqual(released, "none", "idle staging was not released under pressure: " + result.stdout)
             self.assertLess(int(released), 0, result.stdout)
             self.assertGreaterEqual(int(recreated) - int(released), 2 * MiB, result.stdout)
+
+
+class FramePoolTests(unittest.TestCase):
+    """The framebuffer pool: buffers above the pool threshold are banked by size and handed back
+    out. A buffer given to two live frames at once, or one shorter than the frame that got it,
+    shows up here as changed pixels rather than as a crash."""
+
+    def setUp(self):
+        self.core = vs.core
+        self._limit = self.core.max_cache_size
+        self.core.max_cache_size = 2000
+
+    def tearDown(self):
+        self.core.max_cache_size = self._limit
+
+    def _frame(self, width, height, colour):
+        # a fresh clip each time, so every frame is a real allocation rather than a cache hit
+        clip = self.core.std.BlankClip(format=vs.GRAY8, width=width, height=height, length=1, color=[colour])
+        return clip.get_frame(0), colour
+
+    def _check(self, frames):
+        for f, colour in frames:
+            arr = f[0]
+            self.assertEqual(int(arr[0, 0]), colour)
+            self.assertEqual(int(arr[f.height - 1, f.width - 1]), colour)
+
+    def test_buffers_are_recycled_across_sizes_without_being_handed_out_twice(self):
+        sizes = ((2048, 1024), (2048, 1536), (3000, 1000))
+        held = [self._frame(w, h, 10 + i) for i, (w, h) in enumerate(sizes) for _ in range(20)]
+        self._check(held)
+        # free half, out of allocation order, so the pool is left holding a mix
+        for f, _ in held[::2]:
+            f.close()
+        held = held[1::2]
+        gc.collect()
+        # the same sizes again: these come off the pool
+        again = [self._frame(w, h, 40 + i) for i, (w, h) in enumerate(sizes) for _ in range(20)]
+        self._check(again)
+        self._check(held)  # nothing the pool handed out overwrote a frame still in use
+        for f, _ in held + again:
+            f.close()
+
+    def test_lowering_the_limit_drains_the_pool_and_the_core_keeps_working(self):
+        held = [self._frame(1100, 1000, 7) for _ in range(100)]
+        for f, _ in held:
+            f.close()
+        del held
+        gc.collect()
+        self.core.max_cache_size = 1
+        self._check([self._frame(2048, 1024, 200)])
 
 
 if __name__ == "__main__":

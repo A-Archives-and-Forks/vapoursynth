@@ -103,20 +103,9 @@ MemoryUse::~MemoryUse()
     assert(!m_allocated);
     assert(!m_gpu_allocated);
 
-#ifdef DEBUG_STATS
-    size_t num_keys = 0;
-    size_t size_class = 0;
-#endif
-
     for (auto &entry : m_freelist) {
-#ifdef DEBUG_STATS
-        if (entry.first != size_class) {
-            size_class = entry.first;
-            ++num_keys;
-        }
-#endif
-
-        do_deallocate(entry.second);
+        for (uint8_t *ptr : entry.second)
+            do_deallocate(ptr);
     }
 
 #ifdef DEBUG_STATS
@@ -125,8 +114,8 @@ MemoryUse::~MemoryUse()
     fprintf(stderr, "Small Deallocations: %zu\n", m_debug_stats->small_free_count.load());
     fprintf(stderr, "Large Deallocations: %zu\n", m_debug_stats->large_free_count.load());
     fprintf(stderr, "GC Deallocations: %zu\n", m_debug_stats->gc_count.load());
-    fprintf(stderr, "Freelist Length: %zu\n", m_freelist.size());
-    fprintf(stderr, "Freelist Size Classes: %zu\n", num_keys);
+    fprintf(stderr, "Freelist Length: %zu\n", m_freelist_count);
+    fprintf(stderr, "Freelist Size Classes: %zu\n", m_freelist.size());
     delete m_debug_stats;
 #endif
 }
@@ -175,11 +164,15 @@ uint8_t *MemoryUse::allocate_from_freelist(size_t size)
     auto iter = m_freelist.lower_bound(size);
     if (iter != m_freelist.end() && is_good_fit(size, iter->first)) {
         assert(m_freelist_size >= iter->first);
+        assert(!iter->second.empty());
 
-        uint8_t *raw_ptr = iter->second;
+        uint8_t *raw_ptr = iter->second.back();
         size_t block_size = iter->first;
 
-        m_freelist.erase(iter);
+        iter->second.pop_back();
+        if (iter->second.empty())
+            m_freelist.erase(iter);
+        m_freelist_count--;
         m_freelist_size -= block_size;
         live_acquire(block_size);
         m_allocated += block_size;
@@ -207,7 +200,8 @@ void MemoryUse::deallocate_to_system(uint8_t *ptr, size_t size)
 void MemoryUse::deallocate_to_freelist(uint8_t *ptr, size_t size)
 {
     std::lock_guard<std::mutex> lock{ m_mutex };
-    m_freelist.emplace(size, ptr);
+    m_freelist[size].push_back(ptr);
+    m_freelist_count++;
     m_freelist_size += size;
     m_allocated -= size;
     track_deallocated(size);
@@ -232,19 +226,30 @@ void MemoryUse::gc_freelist()
         if (total <= limit)
             return;
 
-        // Pick a random buffer to minimize the risk of thrashing.
-        std::uniform_int_distribution<size_t> dist(0, m_freelist.size() - 1);
+        // Pick a random buffer to minimize the risk of thrashing. Uniform over the banked
+        // buffers, but found by walking the size classes and subtracting their counts rather
+        // than stepping over every buffer: the classes are few and the buffers are many, and
+        // stepping over the latter made draining a large freelist quadratic.
+        std::uniform_int_distribution<size_t> dist(0, m_freelist_count - 1);
         size_t index = dist(m_prng);
 
         auto iter = m_freelist.begin();
-        std::advance(iter, index);
+        while (iter->second.size() <= index) {
+            index -= iter->second.size();
+            ++iter;
+        }
 
         size_t size = iter->first;
-        uint8_t *ptr = iter->second;
+        uint8_t *ptr = iter->second[index];
         assert(size == reinterpret_cast<BlockHeader *>(ptr)->size);
         assert(size <= m_freelist_size);
 
-        m_freelist.erase(iter);
+        // Order within a class carries no meaning, so the hole is filled from the back.
+        iter->second[index] = iter->second.back();
+        iter->second.pop_back();
+        if (iter->second.empty())
+            m_freelist.erase(iter);
+        m_freelist_count--;
         m_freelist_size -= size;
 
         lock.unlock();

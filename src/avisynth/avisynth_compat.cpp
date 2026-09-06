@@ -501,6 +501,28 @@ VSClip::VSClip(VSNode *inclip, FakeAvisynth *fakeEnv, bool pack, const VSAPI *vs
     vi.sample_type = SAMPLE_INT16;
 }
 
+static VideoFrame *newFrameView(const VSFrame *frame, bool writable, const VSAPI *vsapi) {
+    const VSVideoFormat *f = vsapi->getVideoFrameFormat(frame);
+    const bool rgb = f->colorFamily == cfRGB;
+    const int base = rgb ? 1 : 0;
+    const int second = rgb ? 2 : 1;
+    const int third = rgb ? 0 : 2;
+    const bool multiplePlanes = f->numPlanes == 3;
+    const uint8_t *basePtr = vsapi->getReadPtr(frame, base);
+    return new VideoFrame(
+        (BYTE *)basePtr,
+        writable,
+        0,
+        static_cast<int>(vsapi->getStride(frame, base)),
+        vsapi->getFrameWidth(frame, base) * f->bytesPerSample,
+        vsapi->getFrameHeight(frame, base),
+        multiplePlanes ? vsapi->getReadPtr(frame, second) - basePtr : 0,
+        multiplePlanes ? vsapi->getReadPtr(frame, third) - basePtr : 0,
+        multiplePlanes ? static_cast<int>(vsapi->getStride(frame, second)) : 0,
+        multiplePlanes ? vsapi->getFrameWidth(frame, second) * f->bytesPerSample : 0,
+        multiplePlanes ? vsapi->getFrameHeight(frame, second) : 0);
+}
+
 PVideoFrame VSClip::GetFrame(int n, IScriptEnvironment *env) {
     const VSFrame *ref;
     n = std::min(std::max(0, n), vi.num_frames - 1);
@@ -524,23 +546,7 @@ PVideoFrame VSClip::GetFrame(int n, IScriptEnvironment *env) {
     if (!ref)
         vsapi->logMessage(mtFatal, ("Avisynth Compat: error while getting input frame synchronously: "s + buf.data()).c_str(), fakeEnv->core);
 
-    bool isMultiplePlanes = (vi.pixel_type & VideoInfo::CS_PLANAR) && !(vi.pixel_type & VideoInfo::CS_INTERLEAVED);
-
-    const uint8_t *firstPlanePtr = vsapi->getReadPtr(ref, 0);
-
-    VideoFrame *vfb = new VideoFrame(
-        // the data will never be modified due to the writable protections embedded in this mess
-        (BYTE *)firstPlanePtr,
-        false,
-        0,
-        static_cast<int>(vsapi->getStride(ref, 0)),
-        vsapi->getFrameWidth(ref, 0) * vsapi->getVideoFrameFormat(ref)->bytesPerSample,
-        vsapi->getFrameHeight(ref, 0),
-        isMultiplePlanes ? vsapi->getReadPtr(ref, 1) - firstPlanePtr : 0,
-        isMultiplePlanes ? vsapi->getReadPtr(ref, 2) - firstPlanePtr : 0,
-        isMultiplePlanes ? static_cast<int>(vsapi->getStride(ref, 1)) : 0,
-        vsapi->getFrameWidth(ref, 1) * vsapi->getVideoFrameFormat(ref)->bytesPerSample,
-        vsapi->getFrameHeight(ref, 1));
+    VideoFrame *vfb = newFrameView(ref, false, vsapi);
     PVideoFrame pvf(vfb);
     fakeEnv->ownedFrames.insert(std::make_pair(vfb, ref));
     return pvf;
@@ -1039,8 +1045,6 @@ PVideoFrame FakeAvisynth::NewVideoFrame(const VideoInfo &vi, int align) {
     if (uglyNode && uglyCtx)
         propSrc = vsapi->getFrameFilter(uglyN, uglyNode, uglyCtx);
 
-    bool isMultiplePlanes = (vi.pixel_type & VideoInfo::CS_PLANAR) && !(vi.pixel_type & VideoInfo::CS_INTERLEAVED);
-
     VSVideoFormat f;
 
     bool unpack;
@@ -1052,20 +1056,7 @@ PVideoFrame FakeAvisynth::NewVideoFrame(const VideoInfo &vi, int align) {
     if (propSrc)
         vsapi->freeFrame(propSrc);
 
-    uint8_t *firstPlanePtr = vsapi->getWritePtr(ref, 0);
-    VideoFrame *vfb = new VideoFrame(
-        (BYTE *)firstPlanePtr,
-        true,
-        0,
-        static_cast<int>(vsapi->getStride(ref, 0)),
-        vi.width * f.bytesPerSample,
-        vi.height,
-        isMultiplePlanes ? vsapi->getWritePtr(ref, 1) - firstPlanePtr : 0,
-        isMultiplePlanes ? vsapi->getWritePtr(ref, 2) - firstPlanePtr : 0,
-        isMultiplePlanes ? static_cast<int>(vsapi->getStride(ref, 1)) : 0,
-        vsapi->getFrameWidth(ref, 1) * f.bytesPerSample,
-        vsapi->getFrameHeight(ref, 1));
-
+    VideoFrame *vfb = newFrameView(ref, true, vsapi);
     PVideoFrame pvf(vfb);
     ownedFrames.insert(std::make_pair(vfb, ref));
     return pvf;
@@ -1077,20 +1068,7 @@ bool FakeAvisynth::MakeWritable(PVideoFrame *pvf) {
     auto it = ownedFrames.find(vfb);
     assert(it != ownedFrames.end());
     VSFrame *ref = vsapi->copyFrame(it->second, core);
-    uint8_t *firstPlanePtr = vsapi->getWritePtr(ref, 0);
-    VideoFrame *newVfb = new VideoFrame(
-        // the data will never be modified due to the writable protections embedded in this mess
-        (BYTE *)firstPlanePtr,
-        true,
-        0,
-        static_cast<int>(vsapi->getStride(ref, 0)),
-        (*pvf)->row_size,
-        (*pvf)->height,
-        vsapi->getWritePtr(ref, 1) - firstPlanePtr,
-        vsapi->getWritePtr(ref, 2) - firstPlanePtr,
-        static_cast<int>(vsapi->getStride(ref, 1)),
-        (*pvf)->row_sizeUV,
-        (*pvf)->heightUV);
+    VideoFrame *newVfb = newFrameView(ref, true, vsapi);
     *pvf = PVideoFrame(newVfb);
     ownedFrames.insert(std::make_pair(newVfb, ref));
     return true;

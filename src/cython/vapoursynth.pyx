@@ -1705,20 +1705,13 @@ cdef class FrameProps(object):
         try:
             for v in val:
                 if isinstance(v, RawNode):
-                    (<RawNode>v).ensure_valid()
-                    if funcs.mapSetNode(m, b, (<RawNode>v).node, 1) != 0:
-                        raise Error('Not all values are of the same type')
+                    raise Error('Nodes cannot be stored in frame properties')
                 elif isinstance(v, RawFrame):
                     (<RawFrame>v)._ensure_open()
                     if funcs.mapSetFrame(m, b, (<RawFrame>v).constf, 1) != 0:
                         raise Error('Not all values are of the same type')
-                elif isinstance(v, Func):
-                    if funcs.mapSetFunction(m, b, (<Func>v).ref, 1) != 0:
-                        raise Error('Not all values are of the same type')
-                elif callable(v):
-                    tf = createFuncPython(v, self.core, self.funcs)
-                    if funcs.mapSetFunction(m, b, tf.ref, 1) != 0:
-                        raise Error('Not all values are of the same type')
+                elif isinstance(v, Func) or callable(v):
+                    raise Error('Functions cannot be stored in frame properties')
                 elif isinstance(v, (int, enum.Flag)):
                     if funcs.mapSetInt(m, b, int(v), 1) != 0:
                         raise Error('Not all values are of the same type')

@@ -1579,6 +1579,11 @@ struct VSAPI
       Returns a read/write pointer to a frame's properties. The pointer is valid
       as long as the frame lives.
 
+      Nodes and functions cannot be stored in frame properties: the map setters
+      fail on this map, and copyMap into it with such a value is a fatal error.
+      Destroying a frame therefore never destroys a node or runs a function's
+      free callback, which is what lets frames be freed under core locks.
+
 ----------
 
    .. _getStride:
@@ -2147,7 +2152,8 @@ struct VSAPI
 
       Creates an empty array of *type* in *key*. Returns non-zero
       value on failure due to *key* already existing or having an
-      invalid name.
+      invalid name, or *type* being a node or function type on a
+      frame's property map.
 
 ----------
 
@@ -2428,6 +2434,8 @@ struct VSAPI
 
       See mapSetInt_\ () for a complete description of the arguments and general behavior.
 
+      Fails on a frame's property map: nodes cannot be stored in frame properties.
+
 ----------
 
    .. _mapConsumeNode:
@@ -2437,6 +2445,9 @@ struct VSAPI
       Sets a node to the specified key in a map and decreases the reference count.
 
       See mapSetInt_\ () for a complete description of the arguments and general behavior.
+
+      Fails on a frame's property map: nodes cannot be stored in frame properties.
+      The reference is consumed either way.
 
 ----------
 
@@ -2498,6 +2509,8 @@ struct VSAPI
 
       See mapSetInt_\ () for a complete description of the arguments and general behavior.
 
+      Fails on a frame's property map: functions cannot be stored in frame properties.
+
 ----------
 
    .. _mapConsumeFunction:
@@ -2507,6 +2520,9 @@ struct VSAPI
       Sets a function object to the specified key in a map and decreases the reference count.
 
       See mapSetInt_\ () for a complete description of the arguments and general behavior.
+
+      Fails on a frame's property map: functions cannot be stored in frame properties.
+      The reference is consumed either way.
 
 ----------
 

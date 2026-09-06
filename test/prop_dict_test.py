@@ -109,6 +109,22 @@ class PropDictTest(unittest.TestCase):
         self.assertEqual(type(self.props_rw.DataPropStr), str)
         self.assertEqual(type(self.props_rw.DataPropBytes), bytes)
 
+    def test_no_nodes_or_functions(self):
+        clip = self.core.std.BlankClip()
+        with self.assertRaises(vs.Error):
+            self.props_rw["node"] = clip
+        with self.assertRaises(vs.Error):
+            self.props_rw["func"] = lambda: None
+        with self.assertRaises(vs.Error):
+            self.props_rw["mixed"] = [1, clip]
+        self.assertFalse("node" in self.props_rw)
+        self.assertFalse("func" in self.props_rw)
+        self.assertFalse("mixed" in self.props_rw)
+        with self.assertRaises(vs.Error):
+            self.core.std.SetFrameProps(clip, ref=clip)
+        with self.assertRaises(vs.Error):
+            self.core.std.SetFrameProps(clip, fn=lambda: None)
+
 
 if __name__ == "__main__":
     unittest.main()

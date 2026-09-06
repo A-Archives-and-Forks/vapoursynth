@@ -396,20 +396,17 @@ public:
             delete this;
     }
     /* Called from the core destructor only, after every pool and the transfer machinery are
-       gone, which is what makes the flag a promise: all submissions have completed, and the
-       timeline semaphores surviving planes would wait on died with their pools, so plane
-       destruction must skip the producer wait instead of touching dead handles. Log routing
-       points into the core and is dropped here; teardown messages after this go nowhere. */
+       gone, so every submission on a pool's timeline has completed by now. Surviving planes
+       still wait their producer at destruction, before and after this alike: the timeline a
+       plane names is counted and alive for as long as the plane holds it (invariant I24). Log
+       routing points into the core and is dropped here; teardown messages after this go
+       nowhere. */
     void onCoreFreed() {
-        coreFreedFlag.store(true, std::memory_order_release);
         /* Function first, then its context: a reader that still saw the function cannot have
            seen the context nulled yet, so the pair it calls with is always consistent. */
         logFn.store(nullptr);
         logUserData.store(nullptr);
         release();
-    }
-    bool coreFreed() const {
-        return coreFreedFlag.load(std::memory_order_acquire);
     }
 
     /* Only meaningful once create() has succeeded. */
@@ -597,7 +594,6 @@ private:
 
     State state = State::Unused;
     std::atomic<long> refs{1};
-    std::atomic<bool> coreFreedFlag{false};
     VkInstance instanceHandle = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDeviceHandle = VK_NULL_HANDLE;
     VkDevice deviceHandle = VK_NULL_HANDLE;

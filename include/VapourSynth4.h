@@ -402,7 +402,7 @@ struct VSAPI {
     const VSFrame *(VS_CC *addFrameRef)(const VSFrame *f) VS_NOEXCEPT;
     VSFrame *(VS_CC *copyFrame)(const VSFrame *f, VSCore *core) VS_NOEXCEPT; /* Create a copy of a frame with COW semantics for the planes and property set independently, if used on a GPU frame the planes remain read-only */
     const VSMap *(VS_CC *getFramePropertiesRO)(const VSFrame *f) VS_NOEXCEPT;
-    VSMap *(VS_CC *getFramePropertiesRW)(VSFrame *f) VS_NOEXCEPT;
+    VSMap *(VS_CC *getFramePropertiesRW)(VSFrame *f) VS_NOEXCEPT; /* nodes and functions cannot be stored in frame properties: the map setters fail on this map */
 
     ptrdiff_t (VS_CC *getStride)(const VSFrame *f, int plane) VS_NOEXCEPT;
     const uint8_t *(VS_CC *getReadPtr)(const VSFrame *f, int plane) VS_NOEXCEPT; /* Always NULL on GPU frames */
@@ -442,7 +442,7 @@ struct VSAPI {
     VSMap *(VS_CC *createMap)(void) VS_NOEXCEPT;
     void (VS_CC *freeMap)(VSMap *map) VS_NOEXCEPT;
     void (VS_CC *clearMap)(VSMap *map) VS_NOEXCEPT;
-    void (VS_CC *copyMap)(const VSMap *src, VSMap *dst) VS_NOEXCEPT; /* copies all values in src to dst, if a key already exists in dst it's replaced */
+    void (VS_CC *copyMap)(const VSMap *src, VSMap *dst) VS_NOEXCEPT; /* copies all values in src to dst, if a key already exists in dst it's replaced; copying a node or function into a frame's property map is a fatal error */
 
     void (VS_CC *mapSetError)(VSMap *map, const char *errorMessage) VS_NOEXCEPT; /* used to signal errors outside filter getframe function */
     const char *(VS_CC *mapGetError)(const VSMap *map) VS_NOEXCEPT; /* used to query errors, returns 0 if no error */
@@ -452,7 +452,7 @@ struct VSAPI {
     int (VS_CC *mapDeleteKey)(VSMap *map, const char *key) VS_NOEXCEPT;
     int (VS_CC *mapNumElements)(const VSMap *map, const char *key) VS_NOEXCEPT; /* returns -1 if a key doesn't exist */
     int (VS_CC *mapGetType)(const VSMap *map, const char *key) VS_NOEXCEPT; /* returns VSPropertyType */
-    int (VS_CC *mapSetEmpty)(VSMap *map, const char *key, int type) VS_NOEXCEPT;
+    int (VS_CC *mapSetEmpty)(VSMap *map, const char *key, int type) VS_NOEXCEPT; /* fails for node and function types on a frame's property map */
 
     int64_t (VS_CC *mapGetInt)(const VSMap *map, const char *key, int index, int *error) VS_NOEXCEPT;
     int (VS_CC *mapGetIntSaturated)(const VSMap *map, const char *key, int index, int *error) VS_NOEXCEPT;
@@ -472,16 +472,16 @@ struct VSAPI {
     int (VS_CC *mapSetData)(VSMap *map, const char *key, const char *data, int size, int type, int append) VS_NOEXCEPT;
 
     VSNode *(VS_CC *mapGetNode)(const VSMap *map, const char *key, int index, int *error) VS_NOEXCEPT;
-    int (VS_CC *mapSetNode)(VSMap *map, const char *key, VSNode *node, int append) VS_NOEXCEPT; /* returns 0 on success */
-    int (VS_CC *mapConsumeNode)(VSMap *map, const char *key, VSNode *node, int append) VS_NOEXCEPT; /* always consumes the reference, even on error */
+    int (VS_CC *mapSetNode)(VSMap *map, const char *key, VSNode *node, int append) VS_NOEXCEPT; /* returns 0 on success; fails on a frame's property map, nodes cannot be stored in frame properties */
+    int (VS_CC *mapConsumeNode)(VSMap *map, const char *key, VSNode *node, int append) VS_NOEXCEPT; /* always consumes the reference, even on error; fails on a frame's property map */
 
     const VSFrame *(VS_CC *mapGetFrame)(const VSMap *map, const char *key, int index, int *error) VS_NOEXCEPT;
     int (VS_CC *mapSetFrame)(VSMap *map, const char *key, const VSFrame *f, int append) VS_NOEXCEPT; /* returns 0 on success */
     int (VS_CC *mapConsumeFrame)(VSMap *map, const char *key, const VSFrame *f, int append) VS_NOEXCEPT; /* always consumes the reference, even on error */
 
     VSFunction *(VS_CC *mapGetFunction)(const VSMap *map, const char *key, int index, int *error) VS_NOEXCEPT;
-    int (VS_CC *mapSetFunction)(VSMap *map, const char *key, VSFunction *func, int append) VS_NOEXCEPT; /* returns 0 on success */
-    int (VS_CC *mapConsumeFunction)(VSMap *map, const char *key, VSFunction *func, int append) VS_NOEXCEPT; /* always consumes the reference, even on error */
+    int (VS_CC *mapSetFunction)(VSMap *map, const char *key, VSFunction *func, int append) VS_NOEXCEPT; /* returns 0 on success; fails on a frame's property map, functions cannot be stored in frame properties */
+    int (VS_CC *mapConsumeFunction)(VSMap *map, const char *key, VSFunction *func, int append) VS_NOEXCEPT; /* always consumes the reference, even on error; fails on a frame's property map */
 
     /* Plugin and plugin function related */
     int (VS_CC *registerFunction)(const char *name, const char *args, const char *returnType, VSPublicFunction argsFunc, void *functionData, VSPlugin *plugin) VS_NOEXCEPT; /* non-zero return value on success  */

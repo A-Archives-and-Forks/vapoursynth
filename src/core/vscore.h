@@ -270,13 +270,22 @@ typedef vs_intrusive_ptr<VSMapStorage> PVSMapStorage;
 struct VSMap {
 private:
     PVSMapStorage data;
+    bool frameProperties = false;
 public:
-    VSMap(const VSMap *map = nullptr) : data(map ? map->data : new VSMapStorage()) {
+    VSMap(const VSMap *map = nullptr, bool frameProperties = false) : data(map ? map->data : new VSMapStorage()), frameProperties(frameProperties) {
     }
 
     VSMap &operator=(const VSMap &map) {
         data = map.data;
         return *this;
+    }
+
+    bool isFrameProperties() const {
+        return frameProperties;
+    }
+
+    static constexpr bool refusedInFrameProperties(VSPropertyType type) {
+        return type == ptVideoNode || type == ptAudioNode || type == ptFunction;
     }
 
     bool detach() {
@@ -327,6 +336,15 @@ public:
     void copy(const VSMap *src) {
         if (src == this)
             return;
+
+        /* copyMap has no way to report failure, and dropping the values silently would hide
+           the bug, so this is the one place the rule is fatal. */
+        if (frameProperties) {
+            for (auto &iter : src->data->data) {
+                if (refusedInFrameProperties(iter.second->type()))
+                    VS_FATAL_ERROR(("copyMap: nodes and functions cannot be stored in frame properties (key '" + iter.first + "')").c_str());
+            }
+        }
 
         detach();
         for (auto &iter : src->data->data)

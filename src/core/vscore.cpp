@@ -184,7 +184,7 @@ void VSFrame::setAllocationInfo() noexcept {
     }
 }
 
-VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame *propSrc, VSCore *core) noexcept : refcount(1), contentType(mtVideo), width(width), height(height), properties(propSrc ? &propSrc->properties : nullptr), core(core) {
+VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame *propSrc, VSCore *core) noexcept : refcount(1), contentType(mtVideo), width(width), height(height), properties(propSrc ? &propSrc->properties : nullptr, true), core(core) {
     frameRefDebug = core->enableFrameRefDebug;
     if (frameRefDebug) {
         std::lock_guard<std::mutex> lock(core->frameRefMutex);
@@ -220,7 +220,7 @@ VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame *p
 }
 
 VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame *propSrc, VSCore *core, [[maybe_unused]] bool gpuFrame) noexcept
-    : refcount(1), contentType(mtVideo), width(width), height(height), properties(propSrc ? &propSrc->properties : nullptr), core(core) {
+    : refcount(1), contentType(mtVideo), width(width), height(height), properties(propSrc ? &propSrc->properties : nullptr, true), core(core) {
     assert(gpuFrame);
     gpuResident = true;
     frameRefDebug = core->enableFrameRefDebug;
@@ -266,7 +266,7 @@ VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame *p
         setAllocationInfo();
 }
 
-VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame * const *planeSrc, const int *plane, const VSFrame *propSrc, VSCore *core) noexcept : refcount(1), contentType(mtVideo), width(width), height(height), properties(propSrc ? &propSrc->properties : nullptr), core(core) {
+VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame * const *planeSrc, const int *plane, const VSFrame *propSrc, VSCore *core) noexcept : refcount(1), contentType(mtVideo), width(width), height(height), properties(propSrc ? &propSrc->properties : nullptr, true), core(core) {
     frameRefDebug = core->enableFrameRefDebug;
     if (frameRefDebug) {
         std::lock_guard<std::mutex> lock(core->frameRefMutex);
@@ -337,7 +337,7 @@ VSFrame::VSFrame(const VSVideoFormat &f, int width, int height, const VSFrame * 
 }
 
 VSFrame::VSFrame(const VSAudioFormat &f, int numSamples, const VSFrame *propSrc, VSCore *core) noexcept
-    : refcount(1), contentType(mtAudio), properties(propSrc ? &propSrc->properties : nullptr), core(core) {
+    : refcount(1), contentType(mtAudio), properties(propSrc ? &propSrc->properties : nullptr, true), core(core) {
     frameRefDebug = core->enableFrameRefDebug;
     if (frameRefDebug) {
         std::lock_guard<std::mutex> lock(core->frameRefMutex);
@@ -361,7 +361,7 @@ VSFrame::VSFrame(const VSAudioFormat &f, int numSamples, const VSFrame *propSrc,
 }
 
 VSFrame::VSFrame(const VSAudioFormat &f, int numSamples, const VSFrame * const *channelSrc, const int *channel, const VSFrame *propSrc, VSCore *core) noexcept
-    : refcount(1), contentType(mtAudio), properties(propSrc ? &propSrc->properties : nullptr), core(core) {
+    : refcount(1), contentType(mtAudio), properties(propSrc ? &propSrc->properties : nullptr, true), core(core) {
     frameRefDebug = core->enableFrameRefDebug;
     if (frameRefDebug) {
         std::lock_guard<std::mutex> lock(core->frameRefMutex);
@@ -394,7 +394,7 @@ VSFrame::VSFrame(const VSAudioFormat &f, int numSamples, const VSFrame * const *
         setAllocationInfo();
 }
 
-VSFrame::VSFrame(const VSFrame &f) noexcept : refcount(1), core(f.core) {
+VSFrame::VSFrame(const VSFrame &f) noexcept : refcount(1), properties(nullptr, true), core(f.core) {
     frameRefDebug = core->enableFrameRefDebug;
     if (frameRefDebug) {
         std::lock_guard<std::mutex> lock(core->frameRefMutex);

@@ -449,6 +449,8 @@ static int VS_CC mapSetEmpty(VSMap *map, const char *key, int type) VS_NOEXCEPT 
     std::string skey = (type == ptInt) ? remapColorRange(key) : key;
     if (map->find(skey))
         return 1;
+    if (map->isFrameProperties() && VSMap::refusedInFrameProperties(static_cast<VSPropertyType>(type)))
+        return 1;
 
     switch (type) {
         case ptInt:
@@ -486,6 +488,11 @@ bool propSetShared(VSMap *map, const char *key, const T &val, int append) {
     assert(map && key);
     if (append != maReplace && append != maAppend)
         VS_FATAL_ERROR(("Invalid prop append mode given when setting key '" + std::string(key) + "'").c_str());
+
+    if constexpr (VSMap::refusedInFrameProperties(propType)) {
+        if (map->isFrameProperties())
+            return false;
+    }
 
     if (!isValidVSMapKey(key))
         return false;

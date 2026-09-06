@@ -8,7 +8,7 @@ every change must keep. The public contract it describes is the one in `VSVulkan
 two disagree, the header is what plugins were promised and this file is what needs fixing.
 
 Verified against the tree of 2026-09-05 (the release-batch registry with sequence numbers and
-the enforced rules I15 to I24). Section 11 lists invariants that are *not* enforced yet and
+the enforced rules I15 to I25). Section 11 lists invariants that are *not* enforced yet and
 what each would rule out.
 
 ## 1. Objects and ownership
@@ -42,6 +42,9 @@ the counter check); `cacheLock` before `cacheMutex` (eviction); the queue lock a
 mutex take nothing themselves. `registerCache` is called
 after `cacheMutex` is released, never under it. **No lock in this table is held while a release
 callback runs**, and `execPoolsMutex` is never held while calling into anything a plugin wrote.
+Frame property maps refuse nodes and functions (I25), so freeing a frame, which happens under
+`cacheLock` and inside release callbacks, never destroys a node or runs a function's free
+callback.
 
 ## 3. Context life cycle
 
@@ -193,6 +196,7 @@ rung 1 waits.
 | I22 | A context handle is usable exactly from its acquire to the submit or abandon that ends it; any later use is fatal, never a read of freed memory. | the handle lives in the ring slot, bound once at creation; every public entry point runs `failUnlessOwner` first, whose empty-owner case names an ended recording; the wrapper moves the handle's lists out before `submit` drops the claim |
 | I23 | A producer pair naming a pool's timeline never carries a value the pool has not submitted. | `noteSubmitted` under the queue lock at submit, before the caller can learn the value; the check in `setPlaneProducer`; timelines from `createGPUTimeline` are not pool-owned and exempt |
 | I24 | A GPU plane's buffer returns to the allocator only after its producer pair is reached, after the core is freed as before it. | `~VSPlaneData` waits unconditionally; the plane's counted timeline reference keeps the pair valid; every pool drains before `onCoreFreed`, so for a pool's timeline that wait is already satisfied by then |
+| I25 | A frame's property map never holds a node or a function, so destroying a frame never destroys a node or runs plugin code. | the frame-property flag on `VSMap`, set by every frame constructor; `propSetShared` and `mapSetEmpty` fail for those types on such a map, `copyMap` into one is fatal, `SetFrameProps` rejects them at creation |
 
 ## 10. Known windows and their bounds
 

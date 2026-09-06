@@ -3086,6 +3086,14 @@ static void VS_CC setFramePropsCreate(const VSMap *in, VSMap *out, void *userDat
     vsapi->copyMap(in, d->props);
     vsapi->mapDeleteKey(d->props, "clip");
 
+    int numKeys = vsapi->mapNumKeys(d->props);
+    for (int i = 0; i < numKeys; i++) {
+        const char *key = vsapi->mapGetKey(d->props, i);
+        int type = vsapi->mapGetType(d->props, key);
+        if (type == ptVideoNode || type == ptAudioNode || type == ptFunction)
+            RETERROR(("SetFrameProps: nodes and functions cannot be stored as frame properties ('" + std::string(key) + "')").c_str());
+    }
+
     VSFilterDependency deps[] = {{d->node, rpStrictSpatial}};
     vsapi->createVideoFilterEx(out, "SetFrameProps", vsapi->getVideoInfo(d->node), setFramePropsGetFrame, setFramePropsFree, fmParallel, residencyFlags(d->node, vsapi), deps, 1, d.get(), core);
     d.release();

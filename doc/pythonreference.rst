@@ -565,7 +565,8 @@ Classes and Functions
    .. py:attribute:: props
 
       This attribute holds all the frame's properties as a dict. They are also mapped as sub-attributes for
-      compatibility with older scripts. For more information, see:
+      compatibility with older scripts. Nodes and functions cannot be stored as frame properties;
+      assigning one raises an error. For more information, see:
       `API Reference <apireference.html#reserved-frame-properties>`_
       Note: This includes the data for matrix, transfer and primaries. (_Matrix,
       _Transfer, _Primaries) See `Resize <functions/video/resize.html>`_ for more information.
@@ -819,6 +820,7 @@ Classes and Functions
 
       This attribute holds all the frame's properties as a dict. Note that audio frame properties are fairly
       non-sensical as a concept for audio due to an arbitrary number of samples being lumped together and rarely used.
+      Nodes and functions cannot be stored as frame properties; assigning one raises an error.
 
    .. py:method:: copy()
 

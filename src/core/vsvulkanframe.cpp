@@ -20,6 +20,7 @@
 
 #include "vsvulkanframe.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -39,6 +40,12 @@ void copyPlane(uint8_t *dst, ptrdiff_t dstStride, const uint8_t *src, ptrdiff_t 
 }
 
 constexpr VkDeviceSize slotGranularity = 1 << 20;
+
+/* Acquires per demand epoch, per ring. A burst's size is kept for one to two epochs after it
+   ends, 64 to 128 transfers: a couple of seconds of video, long enough that a graph
+   alternating between sizes never pays a reallocation per frame, short enough that a brief
+   high resolution segment does not pin frame sized staging for the rest of the run. */
+constexpr uint32_t demandEpoch = 64;
 
 } // namespace
 
@@ -152,13 +159,16 @@ VSVulkanTransfer::Slot *VSVulkanTransfer::acquireSlot(SlotRing &ring, VkDeviceSi
         return nullptr;
     }
 
-    if (slot->buffer.size < minSize) {
+    /* Sized to recent demand rather than to this request alone, and resized in both
+       directions: too small for the request, or larger than the last two epochs of requests
+       needed, which is how a burst of big frames stops pinning staging once it is over. */
+    const VkDeviceSize wanted = noteDemand(ring, minSize);
+    if (slot->buffer.size < minSize || slot->buffer.size > wanted) {
         dev->destroyBuffer(slot->buffer);
-        VkDeviceSize rounded = (minSize + slotGranularity - 1) & ~(slotGranularity - 1);
         /* Cached host memory measured slightly faster than write combined even for upload
            staging (memcpy in AND the GPU's reads), and for readback the difference is 40x,
            so both rings prefer it. */
-        if (!dev->createBuffer(slot->buffer, rounded,
+        if (!dev->createBuffer(slot->buffer, wanted,
                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 VK_MEMORY_PROPERTY_HOST_CACHED_BIT, errorMessage)) {
@@ -173,6 +183,54 @@ void VSVulkanTransfer::releaseSlot(SlotRing &ring, Slot &slot) {
     slot.claimed.store(false, std::memory_order_release);
     { std::lock_guard<std::mutex> lock(ring.claimMutex); }
     ring.claimCv.notify_one();
+}
+
+VkDeviceSize VSVulkanTransfer::noteDemand(SlotRing &ring, VkDeviceSize minSize) {
+    ring.lastAcquire.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
+    std::lock_guard<std::mutex> lock(ring.demandMutex);
+    if (++ring.epochAcquires > demandEpoch) {
+        ring.previousEpochMax = ring.epochMax;
+        ring.epochMax = 0;
+        ring.epochAcquires = 1;
+    }
+    ring.epochMax = std::max(ring.epochMax, minSize);
+    const VkDeviceSize demand = std::max(ring.epochMax, ring.previousEpochMax);
+    return (demand + slotGranularity - 1) & ~(slotGranularity - 1);
+}
+
+VkDeviceSize VSVulkanTransfer::releaseIdle(std::chrono::steady_clock::duration idleAfter) {
+    if (!dev)
+        return 0;
+    const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+    VkDeviceSize freed = 0;
+    for (SlotRing *ring : { &staging, &readback }) {
+        if (now - ring->lastAcquire.load(std::memory_order_acquire) < idleAfter.count())
+            continue;
+        /* Sampled before any claim: a submission the counter had reached was complete before
+           the walk, and one it had not is left alone however the walk interleaves with it.
+           Values are monotonic, so a copy submitted during the walk is always past the
+           sample. */
+        uint64_t completed = 0;
+        const bool haveCounter = execPool.completedValue(completed);
+        for (auto &slot : ring->slots) {
+            bool expected = false;
+            if (!slot->claimed.compare_exchange_strong(expected, true, std::memory_order_acquire))
+                continue;
+            if (slot->buffer.size && (!slot->value || (haveCounter && completed >= slot->value))) {
+                freed += slot->buffer.size;
+                dev->destroyBuffer(slot->buffer);
+                slot->value = 0;
+            }
+            releaseSlot(*ring, *slot);
+        }
+        /* Whatever demand the freed buffers served is over; the next acquire sizes its slot to
+           what it actually needs. */
+        std::lock_guard<std::mutex> lock(ring->demandMutex);
+        ring->epochMax = 0;
+        ring->previousEpochMax = 0;
+        ring->epochAcquires = 0;
+    }
+    return freed;
 }
 
 bool VSVulkanTransfer::uploadPlanes(VSVulkanPlane *const planes[], int numPlanes, int bytesPerSample,

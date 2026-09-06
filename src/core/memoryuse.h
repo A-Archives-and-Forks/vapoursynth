@@ -148,6 +148,22 @@ public:
             live_release(static_cast<uint64_t>(-delta));
     }
 
+    /* Host memory the Vulkan driver hands out on the core's behalf -- a discrete card's
+       transfer staging lives in system RAM -- accounted by delta like the GPU pool, since it
+       is neither allocated here nor ever seen by the freelist. It counts against the host
+       limit like a frame buffer does, which is what makes the cache give way to it. */
+    void account_host(int64_t delta) {
+        if (delta > 0) {
+            live_acquire(static_cast<uint64_t>(delta));
+            track_allocated(static_cast<size_t>(delta));
+        } else {
+            track_deallocated(static_cast<size_t>(-delta));
+        }
+        m_allocated.fetch_add(static_cast<size_t>(delta), std::memory_order_relaxed);
+        if (delta < 0)
+            live_release(static_cast<uint64_t>(-delta));
+    }
+
     size_t set_gpu_limit(size_t bytes) {
         m_gpu_limit = bytes;
         return m_gpu_limit;

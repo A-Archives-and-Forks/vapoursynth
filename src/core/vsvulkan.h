@@ -294,6 +294,13 @@ struct VSVulkanBuffer {
        resource wanted an alignment coarser than a region. Anything naming the buffer's
        bytes in its allocation -- the memory export path -- must use this, not poolOffset. */
     VkDeviceSize poolBindOffset = 0;
+    /* What createBuffer reported for a standalone allocation: the driver's requirement size,
+       to the GPU pool when the memory is device local and to the host pool otherwise.
+       destroyBuffer reverses exactly this, so a buffer created before the callbacks were
+       installed, which reported nothing, can never drive a pool negative. Pooled buffers
+       leave it zero: their block was accounted when the driver committed it. */
+    VkDeviceSize accountedBytes = 0;
+    bool accountedHost = false;
 };
 
 /* The public handle from VSVULKANAPI::createGPUBuffer: a pooled buffer plus the device
@@ -483,8 +490,9 @@ public:
        between the compute and transfer families when those differ, trading a sliver of
        throughput for never having to record queue family ownership transfers.
 
-       The plain form gives the buffer its own vkAllocateMemory, right for the few big long
-       lived staging buffers; the pooled form sub allocates from the block allocator and is
+       The plain form gives the buffer its own vkAllocateMemory, right for the few big
+       staging buffers, and accounts it by the memory type it landed in (see
+       setAllocationCallback); the pooled form sub allocates from the block allocator and is
        what every frame plane uses. destroyBuffer handles both. */
     bool createBuffer(VSVulkanBuffer &buffer, VkDeviceSize size, VkBufferUsageFlags usage,
         VkMemoryPropertyFlags requiredFlags, VkMemoryPropertyFlags preferredFlags, std::string &errorMessage);
@@ -509,16 +517,27 @@ public:
     /* Block grants and returns are reported here with signed byte deltas, which is how the
        core's MemoryUse sees VRAM without this layer depending on it. Blocks rather than the
        regions carved out of them because the budget is measured against what the driver has
-       committed. Set before any pooled allocation happens. */
+       committed. Standalone buffers -- the transfer rings' staging -- report their
+       requirement size the same way: to the device callback when their memory is device
+       local, to the host callback when the driver placed them in system RAM, which is where
+       a discrete card's host cached staging lives. The core routes the latter into its host
+       pool, so the frame cache yields to it like to any other RAM in use. Set before any
+       allocation happens. */
     typedef void (*VSVulkanAccountFn)(int64_t delta, void *userData);
-    void setAllocationCallback(VSVulkanAccountFn callback, void *userData) {
-        accountFn = callback;
+    void setAllocationCallback(VSVulkanAccountFn deviceCallback, VSVulkanAccountFn hostCallback, void *userData) {
+        accountFn = deviceCallback;
+        hostAccountFn = hostCallback;
         accountUserData = userData;
     }
 
     void accountAllocation(int64_t delta) const {
         if (accountFn)
             accountFn(delta, accountUserData);
+    }
+
+    void accountHostAllocation(int64_t delta) const {
+        if (hostAccountFn)
+            hostAccountFn(delta, accountUserData);
     }
 
     /* Exec pools register so the memory pressure paths can reclaim their completed but
@@ -633,6 +652,7 @@ private:
     std::atomic<VSVulkanLogFn> logFn{nullptr};
     std::atomic<void *> logUserData{nullptr};
     VSVulkanAccountFn accountFn = nullptr;
+    VSVulkanAccountFn hostAccountFn = nullptr;
     void *accountUserData = nullptr;
     std::atomic<VSVulkanPressureFn> pressureFn{nullptr};
     std::atomic<void *> pressureUserData{nullptr};

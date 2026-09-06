@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import unittest
 
 import vapoursynth as vs
@@ -50,6 +53,58 @@ class FilterTestSequenceGPU(GPUTestMixin, FilterTestSequence):
     """The same tests with every std call routed through its GPU path."""
 
 
+# Run in a fresh interpreter with VS_VULKAN_FORCE_STAGING set: the staging rings only exist on
+# the staging paths, which that switch selects everywhere, and it is read when the device is
+# created. Prints grown, shrunk, released, recreated and the unified memory flag.
+STAGING_PROBE = '''
+import time
+import vapoursynth as vs
+
+core = vs.core
+
+
+def used():
+    # staging lands in the host pool on a discrete card and in the VRAM pool on unified memory
+    return core.used_cache_size + core.vulkan_device_info["allocated"]
+
+
+def transfer(width, height, count):
+    # every node is dropped before the caller measures, so only what outlives nodes counts:
+    # committed blocks, which never change here, and the staging slots
+    clip = core.std.BlankClip(format=vs.GRAY8, width=width, height=height, length=count)
+    for n in range(count):
+        with core.std.GPUDownload(core.std.GPUUpload(clip)).get_frame(n):
+            pass
+
+
+transfer(256, 128, 1)  # commits the pooled block and one 1 MiB slot per ring
+base = used()
+transfer(4096, 2048, 1)  # 8 MiB planes: the next slot of each ring is created at 8 MiB
+grown = used() - base
+transfer(256, 128, 139)  # past two demand epochs of small frames: every slot is back at 1 MiB
+shrunk = used() - base
+
+# a GPU frame kept alive pins its block, so trimming cannot move the numbers below
+keep = core.std.GPUUpload(core.std.BlankClip(format=vs.GRAY8, width=64, height=64, length=1)).get_frame(0)
+core.max_cache_size = 1  # 1 MB: the accounted staging alone puts the host pool over its limit
+time.sleep(1.2)  # a ring must have been idle for a second before a pressure sweep releases it
+released = None
+clip = core.std.BlankClip(format=vs.GRAY8, width=64, height=64, length=1000)
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+    for n in range(20):  # completed calls sample the pressure, sweeps run 150 ms apart under it
+        with clip.get_frame(n):
+            pass
+    if used() < base:
+        released = used() - base
+        break
+    time.sleep(0.05)
+transfer(256, 128, 1)  # the slots come back on demand
+recreated = used() - base
+print(grown, shrunk, "none" if released is None else released, recreated, int(core.vulkan_device_info["unified_memory"]))
+'''
+
+
 class KernelRegressionTests(unittest.TestCase):
     """Inputs with a known scalar answer that the SIMD kernels or filter setup once got wrong."""
 
@@ -95,6 +150,23 @@ class KernelRegressionTests(unittest.TestCase):
             with cpu.get_frame(0) as a, gpu.get_frame(0) as b:
                 for p in range(3):
                     self.assertAlmostEqual(a[p][0, 0], b[p][0, 0], places=5, msg=matrix)
+
+    @unittest.skipUnless(HAVE_GPU, "no Vulkan device")
+    def test_transfer_staging_accounted_sized_to_demand_and_released_when_idle(self):
+        env = dict(os.environ, VS_VULKAN_FORCE_STAGING="1")
+        result = subprocess.run([sys.executable, "-c", STAGING_PROBE], env=env, capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grown, shrunk, released, recreated, unified = result.stdout.split()
+        MiB = 1 << 20
+        # one 8 MiB frame each way creates one 8 MiB slot per ring next to the 1 MiB one
+        self.assertGreaterEqual(int(grown), 16 * MiB, result.stdout)
+        # two epochs of small frames later the big slots are gone; four 1 MiB slots per ring at most
+        self.assertLessEqual(int(shrunk), 8 * MiB, result.stdout)
+        # pressure only reaches the host pool here; on unified memory the staging is VRAM
+        if unified == "0":
+            self.assertNotEqual(released, "none", "idle staging was not released under pressure: " + result.stdout)
+            self.assertLess(int(released), 0, result.stdout)
+            self.assertGreaterEqual(int(recreated) - int(released), 2 * MiB, result.stdout)
 
 
 if __name__ == "__main__":

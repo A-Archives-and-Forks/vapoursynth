@@ -122,7 +122,11 @@ What each typed retention counts: a GPU-resident frame its whole size, a host fr
 pooled buffer or region its region size, a user object whatever the caller passed. A pool that
 does not signal progress meters nothing (I21): its retentions are kept and released as usual
 but never enter the total. The allocator's blocks are accounted separately through
-`accountAllocation` into `MemoryUse`; transfer staging buffers are not accounted anywhere.
+`accountAllocation` into `MemoryUse`, and the transfer rings' staging buffers through the same
+device callbacks by memory type: device local into the VRAM pool, system RAM (a discrete
+card's host cached staging) into the host pool via `accountHostAllocation`. Slots are sized to
+the last two epochs of demand, so they shrink after a burst, and `releaseIdle` frees a ring
+that has been idle for a second from the pressure sweep, or of any age from the panic path.
 
 ## 6. Admission gate
 

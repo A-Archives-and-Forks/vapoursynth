@@ -1089,7 +1089,8 @@ struct VSCoreInfo
 
    .. c:member:: int64_t usedFramebufferSize
 
-      Current size of the framebuffer cache, in bytes.
+      Host memory in use by frames, in bytes, plus what the Vulkan driver placed in
+      system RAM on the core's behalf (transfer staging on a discrete card).
 
 
 .. _VSCoreInfo2:
@@ -1126,7 +1127,8 @@ struct VSCoreInfo2
 
    .. c:member:: int64_t usedFramebufferSize
 
-      Current size of the framebuffer cache, in bytes.
+      Host memory in use by frames, in bytes, plus what the Vulkan driver placed in
+      system RAM on the core's behalf (transfer staging on a discrete card).
 
 .. _VSFilterDependency:
 

@@ -24,6 +24,8 @@
 #include "vsvulkanexec.h"
 #include "VapourSynth4.h"
 
+#include <chrono>
+
 /* One GPU resident plane: a linear pitched device local buffer, laid out exactly like the CPU
    plane it mirrors so a matching stride uploads as a single flat copy.
 
@@ -111,6 +113,11 @@ inline bool waitPlaneHost(VSVulkanDevice &device, const VSVulkanPlane &plane) {
    speed. A frame's plane copies all travel in one submission, the ~0.2 ms submission floor
    dwarfing the per plane cost at common sizes.
 
+   Slot buffers are created lazily and sized to the last two epochs of demand, so they shrink
+   back once a burst of big frames is over; they are accounted like every other driver
+   allocation, and releaseIdle() returns a ring's buffers when nothing has used it for a
+   while under memory pressure.
+
    Thread safe the same way the exec pool is: slots are claimed with a CAS walk, claims are held
    only across CPU work, and slots are always claimed before exec contexts so the two rings
    cannot deadlock. The device must outlive this object, and waitIdle() must run before frames
@@ -133,6 +140,16 @@ public:
 
     bool waitIdle(std::string &errorMessage) { return execPool.waitAll(errorMessage); }
 
+    /* Frees the buffers of every slot in a ring nothing has acquired for idleAfter: the
+       memory pressure paths' lever on the rings, since a graph that stopped transferring --
+       moved on to CPU work, or to chains that stay resident -- would otherwise hold two
+       rings of frame sized buffers for the life of the core. Slots in use and slots whose
+       last copy the GPU has not finished are skipped; nothing here waits. Measured from the
+       ring's last acquire, so steady transfers keep their rings warm under any pressure and
+       two sweeps a millisecond apart cannot declare a ring idle between frames. Returns the
+       bytes freed. */
+    VkDeviceSize releaseIdle(std::chrono::steady_clock::duration idleAfter);
+
     /* Testing hook: pretend resizable BAR is absent so the staging path runs everywhere. */
     void setForceStaging(bool force) { forceStaging = force; }
 
@@ -149,9 +166,23 @@ private:
         std::atomic<uint32_t> cursor{0};
         std::mutex claimMutex;
         std::condition_variable claimCv;
+        /* Demand, for sizing the slots: the largest request of the current epoch and of the
+           one before, an epoch being demandEpoch acquires. A slot is sized to the larger of
+           the two rather than to the request in hand, so a graph mixing frame sizes keeps
+           its slots at the largest instead of reallocating per frame, while a burst of big
+           frames stops dictating the size two epochs after it ends and the slots shrink
+           back. Under its own lock; the claim walk stays lock free. */
+        std::mutex demandMutex;
+        VkDeviceSize epochMax = 0;
+        VkDeviceSize previousEpochMax = 0;
+        uint32_t epochAcquires = 0;
+        /* steady_clock ticks of the last acquire, what releaseIdle measures idleness from. */
+        std::atomic<int64_t> lastAcquire{0};
     };
 
     Slot *acquireSlot(SlotRing &ring, VkDeviceSize minSize, std::string &errorMessage);
+    /* Records a request and returns the size a slot serving it should have. */
+    VkDeviceSize noteDemand(SlotRing &ring, VkDeviceSize minSize);
     void releaseSlot(SlotRing &ring, Slot &slot);
     bool waitPlanesHost(VSVulkanPlane *const planes[], int numPlanes, std::string &errorMessage);
 

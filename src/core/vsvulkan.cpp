@@ -1402,6 +1402,20 @@ bool VSVulkanDevice::createBuffer(VSVulkanBuffer &buffer, VkDeviceSize size, VkB
     buffer.size = size;
     buffer.memoryFlags = memProps.memoryTypes[typeIndex].propertyFlags;
 
+    /* Accounted as the driver committed it -- the requirement size, not the request -- and
+       to the pool the memory actually came from: device local into the VRAM pool, anything
+       else (a discrete card's host cached staging is system RAM) into the host pool.
+       Recorded on the buffer so destroyBuffer returns exactly what was reported. */
+    const bool deviceLocal = (buffer.memoryFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+    if (deviceLocal ? accountFn != nullptr : hostAccountFn != nullptr) {
+        buffer.accountedBytes = req.memoryRequirements.size;
+        buffer.accountedHost = !deviceLocal;
+        if (deviceLocal)
+            accountAllocation(static_cast<int64_t>(buffer.accountedBytes));
+        else
+            accountHostAllocation(static_cast<int64_t>(buffer.accountedBytes));
+    }
+
     if (buffer.memoryFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
         VkMemoryMapInfo mapInfo = {};
         mapInfo.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO;
@@ -1444,6 +1458,12 @@ void VSVulkanDevice::destroyBuffer(VSVulkanBuffer &buffer) {
         vk.vkDestroyBuffer(deviceHandle, buffer.buffer, nullptr);
     if (buffer.memory)
         vk.vkFreeMemory(deviceHandle, buffer.memory, nullptr);
+    if (buffer.accountedBytes) {
+        if (buffer.accountedHost)
+            accountHostAllocation(-static_cast<int64_t>(buffer.accountedBytes));
+        else
+            accountAllocation(-static_cast<int64_t>(buffer.accountedBytes));
+    }
     buffer = {};
 }
 

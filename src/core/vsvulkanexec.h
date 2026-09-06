@@ -203,6 +203,10 @@ public:
        hold at the time are not submissions yet and are left alone. */
     bool waitValue(uint64_t value, std::string &errorMessage);
     bool waitAll(std::string &errorMessage);
+    /* The timeline's counter right now, for deciding whether a submission is done without
+       waiting on it. False when the driver refuses the query, which callers treat as "not
+       done". */
+    bool completedValue(uint64_t &value) const;
 
     /* Releases every retained object whose submission has completed, without waiting. Called
        from submit, so an active pool reaps itself with about one submission of lag; an idle

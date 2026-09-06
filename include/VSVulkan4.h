@@ -421,7 +421,10 @@ typedef struct VSVulkanCoreInfo {
     char deviceName[256];
     int64_t deviceMemory; /* largest device local heap */
     int64_t budget;       /* what the driver says this process may reasonably use right now */
-    int64_t allocated;    /* current VapourSynth VRAM use */
+    /* Current VapourSynth use of device memory: frames, pooled buffers, reservations and
+       any transfer staging the driver placed there. Staging in system RAM, the discrete card
+       case, counts toward VSCoreInfo's usedFramebufferSize instead. */
+    int64_t allocated;
     int64_t limit;        /* the eviction limit, settable through setMaxVRAMUse */
     /* Identity for matching against other APIs' device enumerations (CUDA exposes the same
        UUID; the LUID pairs with DXGI adapters and is only meaningful when luidValid). */

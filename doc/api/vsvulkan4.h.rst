@@ -594,7 +594,10 @@ Filled in by getVulkanCoreInfo_.
    * int64_t budget — what the driver says this process may reasonably use
      right now
 
-   * int64_t allocated — current VapourSynth VRAM use
+   * int64_t allocated — current VapourSynth use of device memory: frames,
+     pooled buffers, reservations and any transfer staging the driver placed
+     there; staging in system RAM (the discrete card case) counts toward
+     *usedFramebufferSize* in VSCoreInfo instead
 
    * int64_t limit — the eviction limit, settable through setMaxVRAMUse_
 

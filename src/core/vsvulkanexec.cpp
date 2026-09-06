@@ -461,6 +461,10 @@ bool VSVulkanExecPool::waitValue(uint64_t value, std::string &errorMessage) {
     return true;
 }
 
+bool VSVulkanExecPool::completedValue(uint64_t &value) const {
+    return dev->vk.vkGetSemaphoreCounterValue(dev->device(), timeline->semaphore(), &value) == VK_SUCCESS;
+}
+
 bool VSVulkanExecPool::waitAll(std::string &errorMessage) {
     /* A caller holding a context of this pool would leave that recording outside the promise
        made below and, once every worker did the same, deadlock the ring; fatal instead. The

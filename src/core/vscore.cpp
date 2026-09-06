@@ -1182,8 +1182,16 @@ void VSCore::notifyCaches(bool hostNeedsMemory, bool gpuNeedsMemory) {
        release callbacks, which may allocate, acquire and free frames, and a freed frame can
        drop the last reference to a node, whose destructor takes this very lock. */
     VSVulkanDevice *dev = vulkanDev.load();
-    if (dev)
+    if (dev) {
         dev->sweepExecPools();
+        /* The transfer rings' staging is frame sized and only grows with demand, so a graph
+           that stopped transferring a second ago -- moved on to CPU work, or to chains that
+           stay resident -- gets its buffers returned under pressure on either pool: on a
+           discrete card they are host RAM counted against the cache limit, on unified memory
+           VRAM that is the host's too. Steady transfers keep their rings warm. */
+        if (hostNeedsMemory || gpuNeedsMemory)
+            vulkanTrans->releaseIdle(std::chrono::seconds(1));
+    }
 
     std::lock_guard<std::mutex> lock(cacheLock);
 
@@ -1410,12 +1418,15 @@ bool VSCore::createVulkanDeviceLocked(int deviceIndex) {
     if (!dev->create(deviceIndex, std::getenv("VS_VULKAN_VALIDATION") != nullptr, vulkanDeviceError))
         return false;
 
-    /* VRAM flows into the same MemoryUse as host memory, wired before the first pooled
-       allocation can happen. The callback context cannot dangle: MemoryUse gates its post
-       core self delete on the GPU pool too, so it lives at least until the last region is
-       returned through here. */
+    /* VRAM flows into the same MemoryUse as host memory, wired before the first allocation
+       can happen, and what the driver places in system RAM -- a discrete card's transfer
+       staging -- flows into the host pool, where it counts against the cache limit like a
+       frame. The callback context cannot dangle: MemoryUse gates its post core self delete
+       on both pools, so it lives at least until the last byte is returned through here. */
     dev->setAllocationCallback([](int64_t delta, void *userData) {
         static_cast<vs::MemoryUse *>(userData)->account_gpu(delta);
+    }, [](int64_t delta, void *userData) {
+        static_cast<vs::MemoryUse *>(userData)->account_host(delta);
     }, memory);
     /* The allocator's last resort before failing a frame: evict every cached GPU frame.
        Blunt on purpose — this only runs once the driver has already refused an allocation,
@@ -1487,8 +1498,10 @@ bool VSCore::createVulkanDeviceLocked(int deviceIndex) {
        of the platform rather than something to assume. */
     if (std::getenv("VS_VULKAN_FORCE_STAGING"))
         trans->setForceStaging(true);
-    vulkanDev = dev.release(); /* the core's reference; the device was born with it counted */
+    /* The transfer first: the pressure paths reach it through a plain pointer after loading
+       vulkanDev, so it has to be in place before the atomic store publishes the device. */
     vulkanTrans = std::move(trans);
+    vulkanDev = dev.release(); /* the core's reference; the device was born with it counted */
     /* Silently halving a limit is the kind of thing that costs someone an afternoon later, so
        the unified case says what it did and what the two pools now add up to. */
     std::string limitInfo = "VRAM limit " + std::to_string(memory->gpu_limit() >> 20) +
@@ -1918,8 +1931,12 @@ void VSCore::gpuMemoryPanic() {
                 iter->clearCache(true);
         }
     }
-    if (VSVulkanDevice *dev = vulkanDev.load())
+    if (VSVulkanDevice *dev = vulkanDev.load()) {
+        /* Idle staging goes too, whatever its age: on unified memory it is the very memory
+           the driver just ran out of. Never a slot in use or one the GPU is still copying. */
+        vulkanTrans->releaseIdle(std::chrono::steady_clock::duration::zero());
         dev->trimAllocator();
+    }
 }
 
 bool VSCore::getNodeTiming() noexcept {
@@ -2057,12 +2074,15 @@ VSCore::~VSCore() {
     for(const auto &iter : plugins)
         delete iter.second;
     plugins.clear();
+    if (VSVulkanDevice *dev = vulkanDev.load()) {
+        /* Retracted before the transfer rings go, since the pressure path reaches them. The
+           device may outlive this core through surviving frames, and a late pooled
+           allocation must not call back into a deleted core. The account callbacks stay:
+           MemoryUse gates its own deletion on both pools reaching zero. */
+        dev->setPressureCallback(nullptr, nullptr);
+    }
     vulkanTrans.reset();
     if (VSVulkanDevice *dev = vulkanDev.load()) {
-        /* The device may outlive this core through surviving frames, and a late pooled
-           allocation must not call back into a deleted core. The account callback stays:
-           MemoryUse gates its own deletion on the GPU pool reaching zero. */
-        dev->setPressureCallback(nullptr, nullptr);
         dev->onCoreFreed();
         vulkanDev = nullptr;
     }

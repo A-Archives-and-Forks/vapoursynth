@@ -58,6 +58,7 @@ bool VSVulkanAllocator::allocate(VSVulkanDevice &dev, uint32_t typeIndex, VkDevi
         freeRegions--;
         usedBytes += roundedSize;
         block->liveRegions++;
+        dev.trackCallAllocation(static_cast<int64_t>(roundedSize));
         return true;
     }
 
@@ -71,6 +72,7 @@ bool VSVulkanAllocator::allocate(VSVulkanDevice &dev, uint32_t typeIndex, VkDevi
             offset = aligned;
             usedBytes += roundedSize;
             candidate->liveRegions++;
+            dev.trackCallAllocation(static_cast<int64_t>(roundedSize));
             return true;
         }
     }
@@ -150,16 +152,20 @@ bool VSVulkanAllocator::allocate(VSVulkanDevice &dev, uint32_t typeIndex, VkDevi
        budget is measured against. Accounting the live regions instead let the core sit just
        under its limit while the driver held ~18 percent more and hit the wall. */
     dev.accountAllocation(static_cast<int64_t>(newBlockSize));
+    /* The region, not the block: the block is the driver's commitment and belongs to the
+       budget above, while what this call is about to use is the region carved out of it. */
+    dev.trackCallAllocation(static_cast<int64_t>(roundedSize));
     blocks.push_back(std::move(fresh));
     return true;
 }
 
-void VSVulkanAllocator::free(Block *block, VkDeviceSize offset, VkDeviceSize roundedSize) {
+void VSVulkanAllocator::free(VSVulkanDevice &dev, Block *block, VkDeviceSize offset, VkDeviceSize roundedSize) {
     std::lock_guard<std::mutex> lock(mutex);
     freeLists[{ block->typeIndex | (block->exportable ? (1ull << 32) : 0), roundedSize }].push_back({ block, offset });
     freeRegions++;
     usedBytes -= roundedSize;
     block->liveRegions--;
+    dev.trackCallAllocation(-static_cast<int64_t>(roundedSize));
 }
 
 VkDeviceSize VSVulkanAllocator::trim(VSVulkanDevice &dev) {
@@ -297,7 +303,7 @@ bool VSVulkanDevice::allocatePooled(const VkMemoryRequirements &req, VkMemoryPro
 }
 
 void VSVulkanDevice::freePooled(const VSVulkanPooledRegion &region) {
-    allocator.free(region.block, region.offset, region.size);
+    allocator.free(*this, region.block, region.offset, region.size);
 }
 
 bool VSVulkanDevice::createBufferPooled(VSVulkanBuffer &buffer, VkDeviceSize size, VkBufferUsageFlags usage,

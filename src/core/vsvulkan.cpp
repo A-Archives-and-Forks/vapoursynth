@@ -1465,7 +1465,7 @@ void VSVulkanDevice::destroyBuffer(VSVulkanBuffer &buffer) {
         /* The block owns the memory and its mapping; only the buffer object and the region go. */
         if (buffer.buffer)
             vk.vkDestroyBuffer(deviceHandle, buffer.buffer, nullptr);
-        allocator.free(buffer.poolBlock, buffer.poolOffset, buffer.poolSize);
+        allocator.free(*this, buffer.poolBlock, buffer.poolOffset, buffer.poolSize);
         buffer = {};
         return;
     }

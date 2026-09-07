@@ -1432,6 +1432,10 @@ bool VSCore::createVulkanDeviceLocked(int deviceIndex) {
         static_cast<vs::MemoryUse *>(userData)->account_gpu(delta);
     }, [](int64_t delta, void *userData) {
         static_cast<vs::MemoryUse *>(userData)->account_host(delta);
+    }, [](int64_t delta, void *) {
+        /* Takes no userData on purpose: the per-call tracking is thread local, so this one
+           cannot outlive anything or reach a freed object. */
+        vs::MemoryUse::track_gpu_call(delta);
     }, memory);
     /* The allocator's last resort before failing a frame: evict every cached GPU frame.
        Blunt on purpose — this only runs once the driver has already refused an allocation,

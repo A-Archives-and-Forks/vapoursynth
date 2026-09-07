@@ -247,7 +247,7 @@ public:
         bool exportable, Block *&block, VkDeviceSize &offset, VkDeviceSize &roundedSize, std::string &errorMessage);
     /* No device needed: returning a region only moves it into a bucket, and the memory it
        came from goes back to the driver in trim() or destroy() instead. */
-    void free(Block *block, VkDeviceSize offset, VkDeviceSize roundedSize);
+    void free(VSVulkanDevice &dev, Block *block, VkDeviceSize offset, VkDeviceSize roundedSize);
     /* Hands every block with no live regions back to the driver, called under memory pressure
        after cache eviction so the reclaimed VRAM is real for the rest of the system rather
        than banked in the free lists forever. Returns the bytes given back. */
@@ -534,15 +534,25 @@ public:
        pool, so the frame cache yields to it like to any other RAM in use. Set before any
        allocation happens. */
     typedef void (*VSVulkanAccountFn)(int64_t delta, void *userData);
-    void setAllocationCallback(VSVulkanAccountFn deviceCallback, VSVulkanAccountFn hostCallback, void *userData) {
+    void setAllocationCallback(VSVulkanAccountFn deviceCallback, VSVulkanAccountFn hostCallback,
+        VSVulkanAccountFn callCallback, void *userData) {
         accountFn = deviceCallback;
         hostAccountFn = hostCallback;
+        callAccountFn = callCallback;
         accountUserData = userData;
     }
 
     void accountAllocation(int64_t delta) const {
         if (accountFn)
             accountFn(delta, accountUserData);
+    }
+
+    /* Region granular and per call, unlike the two above: this is what a filter call
+       actually carved and released, which is the number admission control needs. Called from
+       inside the allocator's mutex, which is safe because the other end takes no lock. */
+    void trackCallAllocation(int64_t delta) const {
+        if (callAccountFn)
+            callAccountFn(delta, accountUserData);
     }
 
     void accountHostAllocation(int64_t delta) const {
@@ -677,6 +687,7 @@ private:
     std::atomic<void *> logUserData{nullptr};
     VSVulkanAccountFn accountFn = nullptr;
     VSVulkanAccountFn hostAccountFn = nullptr;
+    VSVulkanAccountFn callAccountFn = nullptr;
     void *accountUserData = nullptr;
     std::atomic<VSVulkanPressureFn> pressureFn{nullptr};
     std::atomic<void *> pressureUserData{nullptr};

@@ -139,15 +139,34 @@ public:
         return m_unified && m_combined_limit && (m_allocated + m_gpu_allocated) > m_combined_limit;
     }
 
+    /* The pool total only: what the driver has committed, which is what the limit, the
+       pressure sweeps and the unified memory brake are measured against. Deliberately NOT the
+       per-call working set any more -- see track_gpu_call. */
     void account_gpu(int64_t delta) {
         if (delta > 0)
             live_acquire(static_cast<uint64_t>(delta));
         m_gpu_allocated.fetch_add(static_cast<size_t>(delta), std::memory_order_relaxed);
+        if (delta < 0)
+            live_release(static_cast<uint64_t>(-delta));
+    }
+
+    /* The per-call working set, which is a different question from the pool total and was
+       being answered with the pool total's numbers. What the estimate needs to predict is how
+       much transient memory ONE call of a filter needs, and the pool is accounted by whole
+       128 MB blocks: a call that carves three planes out of a block already committed moved
+       the total by nothing and reported a peak of zero, while the unlucky call that happened
+       to trigger the next block reported 128 MB of someone else's memory. Reservation deltas
+       had the same problem from the other end, being raised in one call and lowered in
+       another. So the regions themselves are tracked here instead, by the allocator, and the
+       block and reservation deltas stay out of it.
+
+       Static and thread local throughout: it takes no lock, cannot re-enter anything, and
+       needs no object, which is what makes it safe to call from inside the allocator's own
+       mutex where the pool accounting already runs. */
+    static void track_gpu_call(int64_t delta) {
         s_gpu_call_delta += delta;
         if (s_gpu_call_delta > s_gpu_call_peak)
             s_gpu_call_peak = s_gpu_call_delta;
-        if (delta < 0)
-            live_release(static_cast<uint64_t>(-delta));
     }
 
     /* Host memory the Vulkan driver hands out on the core's behalf -- a discrete card's
@@ -155,15 +174,15 @@ public:
        is neither allocated here nor ever seen by the freelist. It counts against the host
        limit like a frame buffer does, which is what makes the cache give way to it. */
     void account_host(int64_t delta) {
-        if (delta > 0) {
+        if (delta > 0)
             live_acquire(static_cast<uint64_t>(delta));
-            track_allocated(static_cast<size_t>(delta));
-        } else {
-            track_deallocated(static_cast<size_t>(-delta));
-        }
         m_allocated.fetch_add(static_cast<size_t>(delta), std::memory_order_relaxed);
         if (delta < 0)
             live_release(static_cast<uint64_t>(-delta));
+        /* Out of the per-call tracker for the same reason as the GPU pool's blocks: the
+           transfer rings are sized to recent demand and released by releaseIdle from whatever
+           call happens to be running, so charging them to one is noise. Frame buffers, which
+           are what the host estimate exists for, still go through track_allocated directly. */
     }
 
     size_t set_gpu_limit(size_t bytes) {

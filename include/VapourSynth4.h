@@ -517,7 +517,11 @@ struct VSAPI {
 #if VAPOURSYNTH_API_MINOR >= 1
     /* Additional cache management to free memory */
     void (VS_CC *clearNodeCache)(VSNode *node) VS_NOEXCEPT; /* clears the cache of the specified node */
-    void (VS_CC *clearCoreCaches)(VSCore *core) VS_NOEXCEPT; /* clears all caches belonging to the specified core */
+    /* Clears all caches belonging to the specified core. On a core with GPU resident nodes
+       this also reaps what the exec pools retained, drops idle transfer staging and hands
+       every fully idle allocator block back to the driver, so the VRAM is returned to the
+       system rather than only to the core's own free lists. */
+    void (VS_CC *clearCoreCaches)(VSCore *core) VS_NOEXCEPT;
 
     /* Basic node information */
     const char *(VS_CC *getNodeName)(VSNode *node) VS_NOEXCEPT; /* the name passed to create*Filter */

@@ -639,6 +639,30 @@ public:
         }
     }
 
+    /* A GPU reset does not have to announce itself. Windows' TDR force-signals every
+       timeline to UINT64_MAX so the waiters are released, then hands back a device whose
+       vkCreateSemaphore, vkDeviceWaitIdle and counter queries all answer VK_SUCCESS --
+       measured on an AMD driver, where nothing ever returns VK_ERROR_DEVICE_LOST. That force
+       signal is therefore the only observable there is, and it cannot be confused with
+       legitimate use: a pool would need 2^64 submissions to reach it.
+
+       So the sweeps recognise it and set this, and from then on acquire, submit and every
+       wait fail with a named error rather than pretending. Before that the counter check in
+       detachCompleted called it a protocol violation and terminated the process, which meant
+       any GPU hang on the machine -- another application's, not necessarily ours, since a TDR
+       resets every context -- killed every running core. A lost pool stops being reaped; what
+       it retains is released by its destructor, which is safe because after a reset nothing is
+       reading it. The flag is one way: a reset device is never usable again. */
+    static constexpr uint64_t resetTimelineValue = UINT64_MAX;
+    void markDeviceLost() { deviceLostFlag.store(true, std::memory_order_release); }
+    bool deviceLost() const { return deviceLostFlag.load(std::memory_order_acquire); }
+    /* One wording wherever it surfaces, so a script sees the same sentence from a filter, a
+       transfer and a pool wait alike. */
+    static const char *deviceLostMessage() {
+        return "the GPU device was reset (a driver timeout or a device loss), so no further "
+            "GPU work can run on this core";
+    }
+
     /* How much device local memory this process can reasonably use right now. Uses the
        driver's live budget when VK_EXT_memory_budget is present, which subtracts what other
        processes already hold, and falls back to the raw heap size otherwise. */
@@ -691,6 +715,7 @@ private:
     void *accountUserData = nullptr;
     std::atomic<VSVulkanPressureFn> pressureFn{nullptr};
     std::atomic<void *> pressureUserData{nullptr};
+    std::atomic<bool> deviceLostFlag{false};
     /* Held for the walk of a sweep, so after unregistration no sweep can see the pool. The
        release callbacks a sweep collects run after it is dropped, since they may register
        or sweep themselves. The batches of releases in flight, one entry per batch with the

@@ -1925,6 +1925,15 @@ void VSCore::clearCaches(bool resetSize) {
         iter->clearCache(resetSize);
 }
 
+void VSCore::releaseGPUMemory() {
+    VSVulkanDevice *dev = vulkanDev.load();
+    if (!dev)
+        return;
+    dev->sweepExecPools();
+    vulkanTrans->releaseIdle(std::chrono::steady_clock::duration::zero());
+    dev->trimAllocator();
+}
+
 void VSCore::refreshVulkanExecBudget() {
     if (VSVulkanDevice *dev = vulkanDev.load())
         dev->setExecRetainedBudget(memory->gpu_limit() / 4);

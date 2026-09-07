@@ -1325,6 +1325,7 @@ public:
     void filterInstanceDestroyed() noexcept;
     void destroyFilterInstance(VSNode *node);
     void clearCaches(bool resetSize);
+    void releaseGPUMemory();
     void gpuMemoryPanic();
     void refreshVulkanExecBudget();
     bool getNodeTiming() noexcept;

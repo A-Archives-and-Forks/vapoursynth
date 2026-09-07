@@ -955,6 +955,10 @@ bool VSVulkanDevice::exportSemaphore(VkSemaphore semaphore, intptr_t &handle, st
 bool VSVulkanDevice::flushDeviceWrites(const VkSemaphore *waitSemaphores, const uint64_t *waitValues, uint32_t waitCount,
     std::string &errorMessage) {
     std::lock_guard<std::mutex> lock(flushMutex);
+    if (deviceLost()) {
+        errorMessage = deviceLostMessage();
+        return false;
+    }
 
     /* Waits become device side dependencies of the availability submission; dropping one
        would let the barrier run before a producer finished, so too many is a hard error
@@ -1301,6 +1305,10 @@ void VSVulkanDevice::execAdmissionGate() {
     if (!budget || execRetainedBytes.load(std::memory_order_relaxed) <= budget)
         return;
     for (;;) {
+        /* Nothing will complete again, and the bytes belong to submissions that never will,
+           so waiting for them is waiting forever. */
+        if (deviceLost())
+            return;
         /* The progress counter is sampled before the sweep, so a completion landing between
            the two is either reaped by the sweep or still ahead of the wait target below, and
            the wait then returns at once. Sampled after, it would already include that
@@ -1312,6 +1320,13 @@ void VSVulkanDevice::execAdmissionGate() {
         uint64_t counter = 0;
         const bool canWait = progressSem &&
             vk.vkGetSemaphoreCounterValue(deviceHandle, progressSem, &counter) == VK_SUCCESS;
+        /* The progress timeline is force-signalled by a reset like every other, and the target
+           below is counter + 1, which wraps to zero and is therefore already reached: without
+           this the gate would spin at full speed sweeping pools that can never complete. */
+        if (canWait && counter >= resetTimelineValue) {
+            markDeviceLost();
+            return;
+        }
         /* Reap everything already completed — a gated thread must collect for itself, since
            the case where every worker stands here is exactly the one where nobody else is
            left to sweep. */

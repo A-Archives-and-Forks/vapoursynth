@@ -79,6 +79,29 @@ Frame property maps refuse nodes and functions (I25), so freeing a frame, which 
 `cacheLock` and inside release callbacks, never destroys a node or runs a function's free
 callback.
 
+## 2a. Device loss
+
+A GPU reset does not have to announce itself. Windows' TDR force-signals every timeline to
+`UINT64_MAX` so the waiters are released, and then hands back a device whose
+`vkCreateSemaphore`, `vkDeviceWaitIdle` and counter queries all answer `VK_SUCCESS`. Measured
+on an AMD driver by hanging the GPU with a data-dependent infinite compute loop: the reset took
+10.4 s, not the 2 s `TdrDelay`, and **nothing ever returned `VK_ERROR_DEVICE_LOST`**. So a flag
+set from that result alone would never be set; the force signal is the only observable there is.
+
+It is also unmistakable, since a pool would need 2^64 submissions to reach it. `detachCompleted`
+and the admission gate therefore test for `VSVulkanDevice::resetTimelineValue` and set the
+device's one-way `deviceLost` flag, and `waitValue` tests the counter that actually satisfied a
+successful wait, so the call that discovers the reset is not also the one that reports work
+complete. From then on `acquire`, `submit`, `waitValue`, `waitAll` and `flushDeviceWrites` fail
+with `deviceLostMessage`, which travels the ordinary filter error path; the sweeps stop reaping
+and the gate returns at once rather than spinning on a progress counter whose `counter + 1`
+wraps to zero. What a pool still retains is released by its destructor, which is safe because
+after a reset nothing is reading it.
+
+Before this the counter check called a reset a protocol violation and `vulkanFatal` terminated
+the process -- and a TDR resets every context on the machine, so any application's runaway
+shader killed every running core.
+
 ## 3. Context life cycle
 
 ```
@@ -125,7 +148,8 @@ Who runs releases, and from where:
 
 `detachCompleted` reads the pool timeline once, checks the counter against `queuedCeiling`
 (read afterwards and never lowered; a counter past it means the semaphore was signalled from
-outside and is fatal), skips claimed contexts, wins the claim by CAS on the rest, and for each
+outside and is fatal -- except at `resetTimelineValue`, which is a GPU reset and not a bug, see
+below), skips claimed contexts, wins the claim by CAS on the rest, and for each
 completed one settles the bytes and moves the list out before dropping the claim. Releases run
 only after that, from a local list, with no lock held.
 
@@ -255,7 +279,8 @@ rung 1 waits.
 | I17 | Retain, submit and abandon only by the claim holder's thread. | `failUnlessOwner` |
 | I18 | `waitAll` (idle wait and destruction) only from a thread holding no context of the pool. | `failIfHoldingContext` in `waitAll` |
 | I19 | A pool is never destroyed while any thread holds one of its contexts. | `failIfAnyContextHeld` in the destructor, after unregistration, when a claim can only mean a thread still using the pool |
-| I20 | The pool's timeline advances only through the pool's own submissions: its counter never exceeds what the pool handed to the queue. | the check in `detachCompleted`, counter read first and `queuedCeiling` after it; the ceiling is stored before the submission that signals it, so it is never behind the counter and the check never fires on a correct program |
+| I20 | The pool's timeline advances only through the pool's own submissions: its counter never exceeds what the pool handed to the queue, except at `resetTimelineValue`, which means a GPU reset (I29). | the check in `detachCompleted`, counter read first and `queuedCeiling` after it; the ceiling is stored before the submission that signals it, so it is never behind the counter and the check never fires on a correct program |
+| I29 | A GPU reset is recognised, reported and survivable: no wait claims work completed that did not, no call spins, every retention is still released exactly once, and the core destructs. | `UINT64_MAX` on any pool or progress timeline sets the device's `deviceLost` flag, after which `acquire`, `submit`, `waitValue`, `waitAll` and `flushDeviceWrites` fail with `deviceLostMessage`, the sweeps stop reaping and the gate returns; retentions go back in `~VSVulkanExecPool` |
 | I21 | Every metered byte belongs to a submission whose completion signals the progress timeline. | `retain` adds bytes only on a pool with `signalsProgress` |
 | I22 | A context handle is usable exactly from its acquire to the submit or abandon that ends it; any later use is fatal, never a read of freed memory. | the handle lives in the ring slot, bound once at creation; every public entry point runs `failUnlessOwner` first, whose empty-owner case names an ended recording; the wrapper moves the handle's lists out before `submit` drops the claim |
 | I23 | A producer pair naming a pool's timeline never carries a value the pool has not submitted. | `noteSubmitted` under the queue lock at submit, before the caller can learn the value; the check in `setPlaneProducer`; timelines from `createGPUTimeline` are not pool-owned and exempt |
@@ -294,7 +319,7 @@ others are cheap.
 | P8 | No lock held during callbacks, and no pair of locks taken in both orders, checked rather than argued. | done once with temporary instrumentation on every lock acquisition, whose result is the order paragraph in section 2; making it standing means a scoped record on each lock plus a check in `runReleases` and at the three other plugin boundaries, under the flag `VS_VULKAN_VALIDATION` already sets | regressions of I7, and of section 2's order, by a future caller |
 | P10 | Every event that reduces the byte total wakes the gate. | a second timeline that only the host signals, once per settle; the gate waits on it and the progress timeline with `VK_SEMAPHORE_WAIT_ANY_BIT` | W6, and with it the gate's 50 ms poll, which can then go entirely |
 | P13 | Freeing a GPU frame never waits on the GPU. | a plane whose producer is still pending hands its buffer to a device-level deferred list keyed by the pair, reaped by the existing sweeps and at teardown, instead of the wait in `~VSPlaneData` | the eviction stall under `cacheLock` on a just-produced frame, and the deadlock where that work depends on a host signal from a thread blocked on `cacheLock` |
-| P16 | After device loss every wait returns an error, every retention is still released once, and destruction completes. | nothing in code; a probe that forces a driver timeout with an infinite shader loop, then exercises acquire, `waitAll` and free | the unverified assumption behind every unbounded wait |
+| P16 | ~~After device loss every wait returns an error, every retention is still released once, and destruction completes.~~ **Done**: this is I29, tested by exactly the probe suggested here. | -- | -- |
 
 With I15 to I18 in place callbacks are pure frees and every rendezvous is unambiguous, which
 is the shape a single-reaper design would enforce structurally; that later change, if wanted,

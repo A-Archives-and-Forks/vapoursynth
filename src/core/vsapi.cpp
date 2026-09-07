@@ -1015,6 +1015,7 @@ static void VS_CC clearNodeCache(VSNode *node) VS_NOEXCEPT {
 static void VS_CC clearCoreCaches(VSCore *core) VS_NOEXCEPT {
     assert(core);
     core->clearCaches(false);
+    core->releaseGPUMemory();
 }
 
 static int VS_CC getCoreNodeTiming(VSCore *core) VS_NOEXCEPT {

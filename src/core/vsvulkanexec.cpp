@@ -214,9 +214,25 @@ void VSVulkanExecPool::sweepCompleted() {
 }
 
 void VSVulkanExecPool::detachCompleted(std::vector<VSVulkanExecRetained> &out) {
-    uint64_t counter = 0;
-    if (dev->vk.vkGetSemaphoreCounterValue(dev->device(), timeline->semaphore(), &counter) != VK_SUCCESS)
+    /* Nothing left to reap once the device is gone, and the counter below would only say so
+       again. What this pool still holds goes back in the destructor. */
+    if (dev->deviceLost())
         return;
+    uint64_t counter = 0;
+    VkResult counterRes = dev->vk.vkGetSemaphoreCounterValue(dev->device(), timeline->semaphore(), &counter);
+    if (counterRes != VK_SUCCESS) {
+        if (counterRes == VK_ERROR_DEVICE_LOST)
+            dev->markDeviceLost();
+        return;
+    }
+    /* A reset before a violation: a driver that force-signals its timelines to release the
+       waiters lands exactly on resetTimelineValue, which no pool can reach by submitting, so
+       the two are told apart by the value rather than confused. This used to be the fatal
+       below, which turned any GPU hang on the machine into a terminated process. */
+    if (counter >= VSVulkanDevice::resetTimelineValue) {
+        dev->markDeviceLost();
+        return;
+    }
     /* The timeline advances only through this pool's own submissions, so a counter past
        everything the pool ever handed to the queue can only mean something else signalled the
        semaphore -- which would make every pending submission look complete below and hand the
@@ -266,6 +282,12 @@ VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
        name the caller and stop. */
     dev->failIfRunningReleases("gpuExecAcquire");
     failIfHoldingContext("gpuExecAcquire");
+    /* Before the gate, which a reset device would otherwise spin in: its progress counter is
+       force-signalled too, and counter + 1 wraps to a value already reached. */
+    if (dev->deviceLost()) {
+        errorMessage = VSVulkanDevice::deviceLostMessage();
+        return nullptr;
+    }
     const std::thread::id me = std::this_thread::get_id();
 
     /* Admission: before this thread claims anything, the device may hold it back while the
@@ -364,6 +386,16 @@ VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
 bool VSVulkanExecPool::submit(VSVulkanExecContext &context, std::string &errorMessage, uint64_t *signaledValue,
     const VSVulkanWait *waits, uint32_t waitCount) {
     failUnlessOwner(context, "gpuExecSubmit");
+    /* A reset device accepts submissions that never execute and whose timeline already reads
+       as complete, so the frame would come out silently wrong; fail the call instead. The
+       recording ends and the retentions go back exactly as they do for any failed submit. */
+    if (dev->deviceLost()) {
+        errorMessage = VSVulkanDevice::deviceLostMessage();
+        dev->vk.vkEndCommandBuffer(context.cmd);
+        releaseRetained(context);
+        releaseClaim(context);
+        return false;
+    }
     VkResult res = dev->vk.vkEndCommandBuffer(context.cmd);
     if (res != VK_SUCCESS) {
         errorMessage = "vkEndCommandBuffer failed (VkResult " + std::to_string(res) + ")";
@@ -436,6 +468,8 @@ bool VSVulkanExecPool::submit(VSVulkanExecContext &context, std::string &errorMe
            queuedCeiling. */
         queuedCeiling.store(nextValue + 1, std::memory_order_release);
         res = dev->vk.vkQueueSubmit2(q->handle(), 1, &submitInfo, VK_NULL_HANDLE);
+        if (res == VK_ERROR_DEVICE_LOST)
+            dev->markDeviceLost();
         if (res == VK_SUCCESS) {
             nextValue++;
             context.pendingValue = nextValue;
@@ -475,6 +509,12 @@ bool VSVulkanExecPool::submit(VSVulkanExecContext &context, std::string &errorMe
 }
 
 bool VSVulkanExecPool::waitValue(uint64_t value, std::string &errorMessage) {
+    /* A reset device answers every wait at once, having force-signalled the timeline, so
+       without this the caller would read "the work is done" off memory nothing wrote. */
+    if (dev->deviceLost()) {
+        errorMessage = VSVulkanDevice::deviceLostMessage();
+        return false;
+    }
     VkSemaphore semaphore = timeline->semaphore();
     VkSemaphoreWaitInfo waitInfo = {};
     waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -483,7 +523,26 @@ bool VSVulkanExecPool::waitValue(uint64_t value, std::string &errorMessage) {
     waitInfo.pValues = &value;
     VkResult res = dev->vk.vkWaitSemaphores(dev->device(), &waitInfo, UINT64_MAX);
     if (res != VK_SUCCESS) {
-        errorMessage = "vkWaitSemaphores failed (VkResult " + std::to_string(res) + ")";
+        /* The conforming half of the same story: a driver that does report the loss reports it
+           here, and the rest of the core learns it the same way as from the force signal. */
+        if (res == VK_ERROR_DEVICE_LOST) {
+            dev->markDeviceLost();
+            errorMessage = VSVulkanDevice::deviceLostMessage();
+        } else {
+            errorMessage = "vkWaitSemaphores failed (VkResult " + std::to_string(res) + ")";
+        }
+        return false;
+    }
+    /* Returning is not proof the work ran. A reset force-signals the timeline past everything,
+       so every wait on it is satisfied at once by a value no submission produced -- which is
+       how a wait could report a frame complete that the GPU abandoned. Ask what value actually
+       satisfied it: one counter query, which is nothing against the ~0.2 ms a submission
+       costs, at the one point where "the GPU finished" becomes a fact the caller acts on. */
+    uint64_t reached = 0;
+    if (dev->vk.vkGetSemaphoreCounterValue(dev->device(), semaphore, &reached) == VK_SUCCESS &&
+            reached >= VSVulkanDevice::resetTimelineValue) {
+        dev->markDeviceLost();
+        errorMessage = VSVulkanDevice::deviceLostMessage();
         return false;
     }
     return true;
@@ -502,6 +561,10 @@ bool VSVulkanExecPool::waitAll(std::string &errorMessage) {
     /* Checked here rather than only in the rendezvous below, which a pool that never
        submitted skips: a release callback may not wait on any pool, submitted or not. */
     dev->failIfRunningReleases("gpuExecPoolWaitIdle");
+    if (dev->deviceLost()) {
+        errorMessage = VSVulkanDevice::deviceLostMessage();
+        return false;
+    }
     uint64_t value;
     {
         std::lock_guard<VSVulkanQueue> queueLock(*q);
@@ -519,6 +582,12 @@ bool VSVulkanExecPool::waitAll(std::string &errorMessage) {
        so that is waited for too before the promise that everything is released holds. */
     sweepCompleted();
     dev->waitExecReleases(this);
+    /* The sweep may be what discovered the reset, and the promise this call makes -- every
+       submission complete, everything released -- is not one a reset device kept. */
+    if (dev->deviceLost()) {
+        errorMessage = VSVulkanDevice::deviceLostMessage();
+        return false;
+    }
     return true;
 }
 

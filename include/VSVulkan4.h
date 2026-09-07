@@ -720,7 +720,16 @@ struct VSVULKANAPI {
     /* Claims a context and begins recording; returns NULL with the error set on device
        loss. Every acquire must end in exactly one submit or abandon, from the thread that
        acquired; retaining, submitting or abandoning from any other thread is fatal, and so
-       is any call with the handle after the submit or abandon that ended it. One
+       is any call with the handle after the submit or abandon that ended it.
+
+       That last one is caught rather than prevented, and there is a case it cannot catch:
+       the handle lives in its ring slot for the life of the pool, so what the check tests is
+       whether the slot's recording belongs to the calling thread. It does not once the
+       recording ends -- until the same thread acquires the same slot again, at which point a
+       kept handle is indistinguishable from the fresh one, being the same object, and the
+       call lands on a recording it was never meant for. Nothing in an ABI that hands back a
+       bare pointer can tell the two apart. So do not keep a handle past the call that ended
+       it: most of the time you will be told, and the rest of the time you will not. One
        context per thread, of this or any other pool: a ring has only two to eight contexts,
        so a second acquire from a thread already holding one could only wait for a slot that,
        once every worker did the same, nobody would ever release, and two threads each waiting

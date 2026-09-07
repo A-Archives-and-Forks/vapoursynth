@@ -64,7 +64,13 @@ void VSVulkanExecPool::failUnlessOwner(const VSVulkanExecContext &context, const
     if (holder == std::this_thread::get_id())
         return;
     /* An empty owner is a handle whose recording already ended: the slot is idle, pending on
-       the GPU, or transiently claimed by a reaper, none of which this caller holds. */
+       the GPU, or transiently claimed by a reaper, none of which this caller holds.
+
+       What this cannot catch is a handle kept across the same thread's next acquire of the
+       same slot: the handle lives in the slot, so the stale pointer and the fresh one are one
+       object with one owner, and no field added here could differ between them. It would take
+       a token the caller carries, which the ABI does not give it. Documented on
+       gpuExecAcquire rather than defended; see I22. */
     std::string message = std::string(what) + (holder == std::thread::id()
         ? " called with a context handle whose recording was already ended by gpuExecSubmit or gpuExecAbandon"
         : " called by a thread that did not acquire the context");

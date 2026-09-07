@@ -263,6 +263,21 @@ private:
     VSVulkanQueue *q = nullptr;
     VSVulkanTimeline *timeline = nullptr;
     uint64_t nextValue = 0; /* guarded by the queue lock */
+    /* The highest value ever handed to the queue. Its only reader is the sanity check in
+       detachCompleted, which needs a ceiling it can trust without taking the queue lock:
+       reading nextValue there was the core's one execPoolsMutex -> queue lock edge, and the
+       queue lock is public through lockVulkanQueue, so a filter holding it across any call
+       that reaches the exec registry -- an allocation, an acquire, creating or freeing a pool
+       -- closed a cycle against an ordinary cache sweep on a worker thread.
+
+       Published before the submission that signals it, which is the whole point of keeping it
+       apart from nextValue: nextValue is raised after vkQueueSubmit2 returns, so the GPU can
+       have signalled the value while nextValue still names the one before it, and a lock free
+       reader would then see a counter past its ceiling and call a correct program fatal. A
+       failed submit leaves this one high, which only makes that check more permissive, and it
+       decides no wait -- waitAll still reads nextValue under the queue lock, where a value
+       that will never be signalled would hang. */
+    std::atomic<uint64_t> queuedCeiling{0};
     /* Compute queue pools additionally signal the device's progress timeline on every
        submission, which is what the admission gate sleeps on. A pool on another queue cannot
        wake it, so what it retains is kept alive and released as usual but never counted:

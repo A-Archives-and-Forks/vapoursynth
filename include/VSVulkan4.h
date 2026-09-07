@@ -489,7 +489,17 @@ struct VSVULKANAPI {
        Brings the device up on first call and stays valid for the core's lifetime. */
     const VSVulkanFunctions *(VS_CC *getVulkanFunctions)(VSCore *core, char *errorMessage, int errorMessageSize) VS_NOEXCEPT;
 
-    /* Mandatory around every vkQueueSubmit you make on the shared queues. */
+    /* Mandatory around every vkQueueSubmit you make on the shared queues.
+
+       This is one of the core's own locks, so treat it as a LEAF: submit between the two
+       calls and do nothing else. In particular call nothing from this API inside the bracket
+       -- allocating GPU memory, creating a frame, acquiring from or waiting on an exec pool,
+       creating or freeing one all reach the core's exec registry, which the core's own frame
+       path locks before this queue, so holding this across one of them deadlocks against an
+       ordinary cache sweep on a worker thread. And do not hold both queues' locks at once:
+       vqTransfer and vqCompute are the same non-recursive lock wherever the device has no
+       dedicated transfer family, so on that hardware the second call never returns. Neither
+       mistake can be diagnosed from inside the core, which is why they are rules here. */
     void (VS_CC *lockVulkanQueue)(VSCore *core, int queue) VS_NOEXCEPT;
     void (VS_CC *unlockVulkanQueue)(VSCore *core, int queue) VS_NOEXCEPT;
 

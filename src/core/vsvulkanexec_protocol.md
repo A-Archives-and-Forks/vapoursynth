@@ -31,19 +31,29 @@ pool has one context per staging slot and never retains anything.
 |---|---|
 | `VSVulkanDevice::execPoolsMutex` + `execReleaseCv` | the pool registry, the batch registry, `nextExecReleaseBatch`, creation of the progress semaphore |
 | `VSVulkanExecPool::claimMutex` + `claimCv` | nothing but the rendezvous between a full ring and `releaseClaim`; the claim itself is the atomic `claimed` |
-| `VSVulkanQueue` | `vkQueueSubmit2`, `nextValue`, `execProgressNext` |
+| `VSVulkanQueue` | `vkQueueSubmit2`, `nextValue`, `execProgressNext`. The only lock here a plugin can hold, through `lockVulkanQueue` |
 | `VSVulkanDevice::flushMutex` | the device's one flush context -- its command pool, buffer, timeline and value -- held across the flush submission and the host wait for it |
 | allocator mutex | blocks and free lists |
 | `VSCore::cacheLock` | the set of nodes with caches |
 | `VSNode::cacheMutex` | one node's cache and consumer list |
 
 Order, outermost first: `execPoolsMutex` before `claimMutex` (a device sweep releases claims
-while walking the registry) and before the queue lock (`detachCompleted` reads `nextValue` for
-the counter check); `flushMutex` before the queue lock, which the flush takes while holding it;
-`cacheLock` before `cacheMutex` (eviction); the queue lock and the allocator mutex take nothing
-themselves. `registerCache` is called
+while walking the registry); `flushMutex` before the queue lock, which the flush takes while
+holding it; `cacheLock` before `cacheMutex` (eviction); the queue lock and the allocator mutex
+take nothing themselves. `registerCache` is called
 after `cacheMutex` is released, never under it. **No lock in this table is held while a release
 callback runs**, and `execPoolsMutex` is never held while calling into anything a plugin wrote.
+
+The queue lock is a leaf and has to stay one (I28), because it is the one lock in this table a
+plugin holds: `lockVulkanQueue` hands it out for raw submissions. `detachCompleted` used to take
+it under `execPoolsMutex` to read `nextValue`, and that single edge was enough -- a filter
+holding the queue lock across any call reaching the exec registry (an allocation, an acquire,
+creating or freeing a pool) deadlocked against a worker thread in `notifyCaches` ->
+`sweepExecPools`, which needs no second plugin to be running. The check reads the lock free
+`queuedCeiling` instead. The other half of the rule cannot be enforced from in here and is
+stated in VSVulkan4.h: submit inside the bracket and call nothing else, and never hold both
+queues' locks, which are one non-recursive lock where the device has no dedicated transfer
+family.
 Frame property maps refuse nodes and functions (I25), so freeing a frame, which happens under
 `cacheLock` and inside release callbacks, never destroys a node or runs a function's free
 callback.
@@ -92,8 +102,8 @@ Who runs releases, and from where:
 | `abandon`, failed `submit` | the caller | that recording's uncounted retentions |
 | destructor | `freeGPUExecPool` | everything left |
 
-`detachCompleted` reads the pool timeline once, checks the counter against `nextValue` (read
-afterwards, under the queue lock; a counter past it means the semaphore was signalled from
+`detachCompleted` reads the pool timeline once, checks the counter against `queuedCeiling`
+(read afterwards and never lowered; a counter past it means the semaphore was signalled from
 outside and is fatal), skips claimed contexts, wins the claim by CAS on the rest, and for each
 completed one settles the bytes and moves the list out before dropping the claim. Releases run
 only after that, from a local list, with no lock held.
@@ -220,10 +230,11 @@ rung 1 waits.
 | I16 | One context per pool per thread. | the owner thread recorded on the claim; `failIfHoldingContext` in `acquire` |
 | I26 | A thread waiting for a context holds no context of another pool, so two full rings can never wait on each other. | `failIfHoldingForeignContext` on `acquire`'s slow path, walking the pool registry under `execPoolsMutex` |
 | I27 | A producer is published only on a plane its frame owns outright, so a GPU write never reaches a frame that shares the plane. | `failIfPlaneShared` in `gpuExecWritesPlane` and `setGPUPlaneProducer`, testing `VSPlaneData::unique()` |
+| I28 | The queue lock is a leaf: nothing in the core takes another lock while holding it, and nothing takes it while holding another except `flushMutex`, whose flush is the submission. | `detachCompleted` reads `queuedCeiling` rather than `nextValue`; the rule for the half a plugin owns is stated on `lockVulkanQueue` in VSVulkan4.h |
 | I17 | Retain, submit and abandon only by the claim holder's thread. | `failUnlessOwner` |
 | I18 | `waitAll` (idle wait and destruction) only from a thread holding no context of the pool. | `failIfHoldingContext` in `waitAll` |
 | I19 | A pool is never destroyed while any thread holds one of its contexts. | `failIfAnyContextHeld` in the destructor, after unregistration, when a claim can only mean a thread still using the pool |
-| I20 | The pool's timeline advances only through the pool's own submissions: its counter never exceeds `nextValue`. | the check in `detachCompleted`, counter read first and `nextValue` after it under the queue lock |
+| I20 | The pool's timeline advances only through the pool's own submissions: its counter never exceeds what the pool handed to the queue. | the check in `detachCompleted`, counter read first and `queuedCeiling` after it; the ceiling is stored before the submission that signals it, so it is never behind the counter and the check never fires on a correct program |
 | I21 | Every metered byte belongs to a submission whose completion signals the progress timeline. | `retain` adds bytes only on a pool with `signalsProgress` |
 | I22 | A context handle is usable exactly from its acquire to the submit or abandon that ends it; any later use is fatal, never a read of freed memory. | the handle lives in the ring slot, bound once at creation; every public entry point runs `failUnlessOwner` first, whose empty-owner case names an ended recording; the wrapper moves the handle's lists out before `submit` drops the claim |
 | I23 | A producer pair naming a pool's timeline never carries a value the pool has not submitted. | `noteSubmitted` under the queue lock at submit, before the caller can learn the value; the check in `setPlaneProducer`; timelines from `createGPUTimeline` are not pool-owned and exempt |

@@ -217,17 +217,18 @@ void VSVulkanExecPool::detachCompleted(std::vector<VSVulkanExecRetained> &out) {
     uint64_t counter = 0;
     if (dev->vk.vkGetSemaphoreCounterValue(dev->device(), timeline->semaphore(), &counter) != VK_SUCCESS)
         return;
-    /* The timeline advances only through this pool's own submissions, and nextValue is the
-       last value it ever signalled, so a counter past it can only mean something else
-       signalled the semaphore -- which would make every pending submission look complete
-       below and hand the GPU's inputs back while it still reads them. nextValue is read after
-       the counter, under the queue lock, so a submission racing in between can only raise
-       it: no false positives. */
-    {
-        std::lock_guard<VSVulkanQueue> queueLock(*q);
-        if (counter > nextValue)
-            vulkanFatal("the exec pool's timeline was signalled from outside the pool: its counter is past the last value the pool submitted");
-    }
+    /* The timeline advances only through this pool's own submissions, so a counter past
+       everything the pool ever handed to the queue can only mean something else signalled the
+       semaphore -- which would make every pending submission look complete below and hand the
+       GPU's inputs back while it still reads them. The ceiling is read after the counter and
+       never lowered, so a submission racing in between can only raise it: no false positives.
+
+       Deliberately queuedCeiling and not nextValue under the queue lock. This runs under
+       execPoolsMutex, and the queue lock is one a plugin can hold (lockVulkanQueue), so that
+       one edge was enough to deadlock a filter holding the queue lock across a core call
+       against a worker thread sweeping from notifyCaches. */
+    if (counter > queuedCeiling.load(std::memory_order_acquire))
+        vulkanFatal("the exec pool's timeline was signalled from outside the pool: its counter is past the last value the pool submitted");
     for (auto &context : contexts) {
         /* The claim is the only thing that may be looked at unclaimed. Skipping on an
            empty retention list would be cheaper, but retain() pushes onto that vector
@@ -422,13 +423,18 @@ bool VSVulkanExecPool::submit(VSVulkanExecContext &context, std::string &errorMe
     {
         /* Value allocation and submission stay together under the queue lock, since timeline
            signal values must reach the queue in increasing order and the lock is already
-           mandatory for the submit itself. A failed submit burns no value on either
-           timeline; a later success skipping past a burned progress value is fine, gaps are
-           legal on timelines and the gate only ever waits for counter + 1. */
+           mandatory for the submit itself. A failed submit burns no value on either timeline,
+           leaving only the lock free ceiling below one high; a later success skipping past a
+           burned progress value is fine, gaps are legal on timelines and the gate only ever
+           waits for counter + 1. */
         std::lock_guard<VSVulkanQueue> queueLock(*q);
         signalInfos[0].value = nextValue + 1;
         if (signalsProgress)
             signalInfos[1].value = dev->execProgressNext + 1;
+        /* Before the submit rather than with nextValue after it, so a sweep reading a counter
+           that already includes this submission cannot see a ceiling behind it; see
+           queuedCeiling. */
+        queuedCeiling.store(nextValue + 1, std::memory_order_release);
         res = dev->vk.vkQueueSubmit2(q->handle(), 1, &submitInfo, VK_NULL_HANDLE);
         if (res == VK_SUCCESS) {
             nextValue++;

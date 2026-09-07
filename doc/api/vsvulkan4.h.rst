@@ -223,7 +223,9 @@ queue when the device has no dedicated transfer family). ``VkQueue`` is
 externally synchronized, so every submission a plugin makes must hold the
 matching lock via lockVulkanQueue_/unlockVulkanQueue_. Filters that signal
 their own timeline should allocate the value inside that same lock, so
-signals reach the queue in increasing order.
+signals reach the queue in increasing order. That lock is one of the core's
+own, so it has to be held as a leaf: submit inside it and call nothing else,
+and never hold both queues' locks at once.
 
 **Recording and submitting.** Doing the above by hand is the same work in
 every filter, so the core offers it as an exec pool (createGPUExecPool_): a
@@ -733,6 +735,18 @@ void lockVulkanQueue(VSCore \*core, int queue)
    Allocate your timeline values inside the lock so their signal order
    matches their numeric order. Filters using an exec pool never need this;
    gpuExecSubmit_ does both.
+
+   This is one of the core's own locks, so treat it as a **leaf**: submit
+   between the two calls and do nothing else. Call nothing from this API
+   inside the bracket — allocating GPU memory, creating a frame, acquiring
+   from or waiting on an exec pool, creating or freeing one all reach the
+   core's exec registry, which the core's own frame path locks before this
+   queue, so holding this across one of them deadlocks against an ordinary
+   cache sweep on a worker thread. And do not hold both queues' locks at
+   once: vqTransfer and vqCompute are the same non-recursive lock wherever
+   the device has no dedicated transfer family (VSVulkanQueueType_), so on
+   that hardware the second call never returns. Neither mistake can be
+   diagnosed from inside the core, which is why they are rules here.
 
 ----------
 

@@ -781,6 +781,20 @@ void setGPUPlaneProducer(VSFrame \*frame, int plane, VSGPUTimeline_ \*timeline, 
    submitted, the *signaledValue* of a gpuExecSubmit_ call; a larger value is
    fatal.
 
+   Publish a value whose signal is already on its way: one the semaphore has
+   reached, or one that work you have already handed to a queue or a stream
+   will signal on its own. Never a value you still have to signal yourself
+   from the host. Whoever waits on the pair may be holding locks inside the
+   core, because freeing a frame waits out its producer and cache eviction
+   frees frames, so a signal that needs a host thread to get around to it can
+   end up waiting on the very thread it is blocking. A signal already in
+   flight cannot be, since nothing the host does afterwards can hold it up.
+   gpuExecSubmit_ hands you such a value by construction; on a timeline of
+   your own the ordering is yours to keep, so signal, or enqueue the signal,
+   and only then publish. The CUDA example does exactly this: it enqueues
+   cudaSignalExternalSemaphoresAsync on its stream and publishes the value
+   afterwards.
+
 ----------
 
 .. _createGPUTimeline:

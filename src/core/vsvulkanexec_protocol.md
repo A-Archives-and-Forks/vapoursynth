@@ -176,7 +176,12 @@ rung 1 waits.
 - Declare a write only on a plane the frame owns outright. `copyFrame` shares planes and GPU
   planes have no copy on write, so writing a shared one would change the other frame too.
 - A producer pair on a pool's timeline names a value the pool has submitted; a larger value is
-  fatal at publish. Timelines from `createGPUTimeline` carry no such bound.
+  fatal at publish. Timelines from `createGPUTimeline` carry no such bound, so the same
+  discipline is the filter's: publish only a value whose signal is already in flight, never one
+  the host has yet to issue. A consumer of the pair may be holding `cacheLock` -- freeing a
+  frame waits out its producer and eviction frees frames -- so a signal waiting on a host thread
+  can be waiting on the thread it is blocking. This is what keeps P13's deadlock out of reach
+  by construction rather than by luck; the stall it also describes remains.
 
 ## 9. Invariants
 

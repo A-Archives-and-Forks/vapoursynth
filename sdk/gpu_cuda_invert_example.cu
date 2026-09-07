@@ -349,7 +349,14 @@ static const VSFrame *VS_CC cudaInvertGetFrame(int n, int activationReason, void
         uint64_t value;
         /* Values are allocated under the instance lock and signalled in stream order, which
            keeps this timeline's signals monotonic like a queue lock does for Vulkan
-           filters. */
+           filters.
+
+           Note the order below: the signal is enqueued on the stream BEFORE the pair is
+           published. That is the rule setGPUPlaneProducer states, and it is not cosmetic. A
+           consumer waiting on the pair may be holding a lock inside the core, since freeing a
+           frame waits out its producer and cache eviction frees frames, so a value whose signal
+           still needs a host thread could be waiting on the thread it is blocking. Once the
+           signal is in the stream nothing the host does can hold it up. */
         value = ++d->nextValue;
         cudaExternalSemaphoreSignalParams sp;
         memset(&sp, 0, sizeof(sp));

@@ -238,7 +238,14 @@ static const VSFrame *VS_CC invertGetFrame(int n, int activationReason, void *in
 
         /* Value allocation and submission belong inside the queue lock together: this is what
            keeps this instance's timeline signals reaching the queue in increasing order while
-           other filters, and the core itself, submit concurrently. */
+           other filters, and the core itself, submit concurrently.
+
+           The pair is published after the submit, not before, which is the rule
+           setGPUPlaneProducer states: once the submission carrying the signal is on the queue,
+           the value arrives whatever the host does next. A consumer waiting on the pair may be
+           holding a lock inside the core, since freeing a frame waits out its producer and
+           cache eviction frees frames, so a value whose signal still needed a host thread could
+           be waiting on the thread it is blocking. */
         d->vkapi->lockVulkanQueue(core, vqCompute);
         value = ++d->nextValue;
         signalInfo.value = value;

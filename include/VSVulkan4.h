@@ -501,7 +501,18 @@ struct VSVULKANAPI {
     int (VS_CC *getGPUPlane)(const VSFrame *frame, int plane, VSVulkanPlaneInfo *info) VS_NOEXCEPT; /* nonzero when the frame is not GPU resident or the plane does not exist */
     /* Publishes the producer pair of a plane you write; the plane takes its own reference and
        NULL publishes it as host ready. Fatal on a plane the frame shares with another, for the
-       reason gpuExecWritesPlane gives. */
+       reason gpuExecWritesPlane gives.
+
+       Publish a value whose signal is already on its way: one the semaphore has reached, or one
+       that work you have already handed to a queue or a stream will signal on its own. Never a
+       value you still have to signal yourself from the host. Whoever waits on this pair may be
+       holding locks inside the core -- freeing a frame waits out its producer, and cache
+       eviction frees frames -- so a signal that needs a host thread to get around to it can be
+       waiting on the very thread it is blocking. A signal already in flight cannot be, since
+       nothing the host does afterwards can hold it up. gpuExecSubmit gives you such a value by
+       construction, which is why an exec pool's timeline is checked rather than trusted; on
+       your own timeline the ordering is yours to keep. Signal, or enqueue the signal, and only
+       then publish. */
     void (VS_CC *setGPUPlaneProducer)(VSFrame *frame, int plane, VSGPUTimeline *timeline, uint64_t value) VS_NOEXCEPT;
 
     /* ---- Timelines, the semaphores producer pairs are published on ---- */

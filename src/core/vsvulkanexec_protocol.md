@@ -173,6 +173,8 @@ rung 1 waits.
 - Pools are destroyed in the filter's free callback, with no context claimed; destroying one
   while holding its own context is fatal.
 - Never signal a pool's timeline from outside.
+- Declare a write only on a plane the frame owns outright. `copyFrame` shares planes and GPU
+  planes have no copy on write, so writing a shared one would change the other frame too.
 - A producer pair on a pool's timeline names a value the pool has submitted; a larger value is
   fatal at publish. Timelines from `createGPUTimeline` carry no such bound.
 
@@ -197,6 +199,7 @@ rung 1 waits.
 | I15 | A release callback only frees: no acquire, GPU allocation, pool creation, pool free or pool wait from a thread running a batch. | `failIfRunningReleases` in `acquire`, `allocatePooled`, `registerExecPool`, `unregisterExecPool`, `waitAll` |
 | I16 | One context per pool per thread. | the owner thread recorded on the claim; `failIfHoldingContext` in `acquire` |
 | I26 | A thread waiting for a context holds no context of another pool, so two full rings can never wait on each other. | `failIfHoldingForeignContext` on `acquire`'s slow path, walking the pool registry under `execPoolsMutex` |
+| I27 | A producer is published only on a plane its frame owns outright, so a GPU write never reaches a frame that shares the plane. | `failIfPlaneShared` in `gpuExecWritesPlane` and `setGPUPlaneProducer`, testing `VSPlaneData::unique()` |
 | I17 | Retain, submit and abandon only by the claim holder's thread. | `failUnlessOwner` |
 | I18 | `waitAll` (idle wait and destruction) only from a thread holding no context of the pool. | `failIfHoldingContext` in `waitAll` |
 | I19 | A pool is never destroyed while any thread holds one of its contexts. | `failIfAnyContextHeld` in the destructor, after unregistration, when a claim can only mean a thread still using the pool |
@@ -226,8 +229,12 @@ pool that copies GPU frames has to read them), P11 and P12 are I22 and I23, P17 
 skip it removed dated from timelines dying with their pools, before they were counted), and P14
 is I26 -- narrowing the contract rather than defending it, since a survey of every pool user in
 the tree found none holding two contexts and no reason to: the dependency that would motivate
-it travels as a timeline value. Each of the rest would delete a further class of interleavings
-from what must be reasoned about; P13 is a design change, the others are cheap.
+it travels as a timeline value. P15 is I27, promoted once a probe showed the shared writable
+frame it describes is two ordinary calls away rather than contrived: `copyFrame` of a GPU frame
+returns a writable frame whose plane 0 is the same `VkBuffer`, and the host's safety net, the
+copy on write inside `getWritePtr`, does not exist for GPU planes. Each of the rest would delete
+a further class of interleavings from what must be reasoned about; P13 is a design change, the
+others are cheap.
 
 | # | Candidate | Enforce by | Eliminates |
 |---|---|---|---|
@@ -235,7 +242,6 @@ from what must be reasoned about; P13 is a design change, the others are cheap.
 | P8 | No lock held during callbacks, checked rather than argued. | debug wrappers on `cacheLock` and `execPoolsMutex` that record the owner; `runReleases` asserts the current thread owns neither | regressions of I7 by a future caller |
 | P10 | Every event that reduces the byte total wakes the gate. | a second timeline that only the host signals, once per settle; the gate waits on it and the progress timeline with `VK_SEMAPHORE_WAIT_ANY_BIT` | W6, and with it the gate's 50 ms poll, which can then go entirely |
 | P13 | Freeing a GPU frame never waits on the GPU. | a plane whose producer is still pending hands its buffer to a device-level deferred list keyed by the pair, reaped by the existing sweeps and at teardown, instead of the wait in `~VSPlaneData` | the eviction stall under `cacheLock` on a just-produced frame, and the deadlock where that work depends on a host signal from a thread blocked on `cacheLock` |
-| P15 | A producer is published only on a plane whose plane data is unique. | fatal in both publication paths when `VSPlaneData::unique()` is false | a filter writing into a copied GPU frame, which shares plane data and corrupts the original silently |
 | P16 | After device loss every wait returns an error, every retention is still released once, and destruction completes. | nothing in code; a probe that forces a driver timeout with an infinite shader loop, then exercises acquire, `waitAll` and free | the unverified assumption behind every unbounded wait |
 
 With I15 to I18 in place callbacks are pure frees and every rendezvous is unambiguous, which

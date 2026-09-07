@@ -1305,11 +1305,22 @@ static int VS_CC vkGetGPUPlane(const VSFrame *frame, int plane, VSVulkanPlaneInf
     return 0;
 }
 
+static void failIfPlaneShared(const VSFrame *frame, int plane, const char *what) {
+    if (frame->planeIsUnique(plane))
+        return;
+    std::string message = std::string(what) + " called on plane " + std::to_string(plane) +
+        " of a frame that shares it with another frame; a GPU plane has no copy on write, so the"
+        " write would land in the other frame too. Take a new frame with the properties of the"
+        " old one instead of copying it.";
+    vulkanFatal(message.c_str());
+}
+
 static void VS_CC vkSetGPUPlaneProducer(VSFrame *frame, int plane, VSGPUTimeline *timeline, uint64_t value) VS_NOEXCEPT {
     assert(frame);
     VSVulkanPlane *gpuPlane = frame->getGPUPlane(plane);
     if (!gpuPlane)
         return;
+    failIfPlaneShared(frame, plane, "setGPUPlaneProducer");
     setPlaneProducer(*gpuPlane, reinterpret_cast<VSVulkanTimeline *>(timeline), value);
 }
 
@@ -1640,6 +1651,7 @@ static void VS_CC vkGPUExecReadsFrame(VSGPUExecContext *context, const VSFrame *
 static void VS_CC vkGPUExecWritesPlane(VSGPUExecContext *context, VSFrame *frame, int plane) VS_NOEXCEPT {
     assert(frame);
     checkExecHandle(context, "gpuExecWritesPlane");
+    failIfPlaneShared(frame, plane, "gpuExecWritesPlane");
     context->publish.push_back({ frame, plane });
 }
 

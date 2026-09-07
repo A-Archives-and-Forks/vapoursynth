@@ -499,7 +499,10 @@ struct VSVULKANAPI {
        NULL is returned when no Vulkan device is available. Note that newVideoFrame2 also supports GPU resident frames */
     VSFrame *(VS_CC *newGPUVideoFrame)(const VSVideoFormat *format, int width, int height, const VSFrame *propSrc, VSCore *core) VS_NOEXCEPT;
     int (VS_CC *getGPUPlane)(const VSFrame *frame, int plane, VSVulkanPlaneInfo *info) VS_NOEXCEPT; /* nonzero when the frame is not GPU resident or the plane does not exist */
-    void (VS_CC *setGPUPlaneProducer)(VSFrame *frame, int plane, VSGPUTimeline *timeline, uint64_t value) VS_NOEXCEPT; /* the plane takes its own reference; NULL publishes the plane as host ready */
+    /* Publishes the producer pair of a plane you write; the plane takes its own reference and
+       NULL publishes it as host ready. Fatal on a plane the frame shares with another, for the
+       reason gpuExecWritesPlane gives. */
+    void (VS_CC *setGPUPlaneProducer)(VSFrame *frame, int plane, VSGPUTimeline *timeline, uint64_t value) VS_NOEXCEPT;
 
     /* ---- Timelines, the semaphores producer pairs are published on ---- */
 
@@ -697,7 +700,12 @@ struct VSVULKANAPI {
        its own reference, so the caller still releases its own reference normally. */
     void (VS_CC *gpuExecReadsFrame)(VSGPUExecContext *context, const VSFrame *frame) VS_NOEXCEPT;
     /* Declares that this submission writes the plane: gpuExecSubmit publishes the pool's
-       (timeline, value) on it as the producer pair. */
+       (timeline, value) on it as the producer pair. The frame must own the plane outright:
+       copying a frame shares its planes, and a GPU plane has no copy on write, so a write
+       declared on a shared plane would land in the other frame as well. That is fatal here
+       rather than silent. Copy a frame only to inherit properties you then keep; to write,
+       take newGPUVideoFrame or newVideoFrame2 with the old frame as the property source.
+       Sharing a plane this filter does not write stays fine, the check being per plane. */
     void (VS_CC *gpuExecWritesPlane)(VSGPUExecContext *context, VSFrame *frame, int plane) VS_NOEXCEPT;
     /* Hands a scratch buffer to the context, which destroys it once the submission
        completes. Ownership transfers; do not destroy it yourself. */

@@ -503,6 +503,15 @@ public:
         return (plane >= 0 && plane < numPlanes && plane < 3 && data[plane]) ? data[plane]->gpu : nullptr;
     }
 
+    /* Whether this frame is the only owner of a plane's storage. Copying a frame shares its
+       planes, and on the host that is invisible because getWritePtr duplicates a shared plane
+       before handing it out. GPU planes have no such step -- getWritePtr refuses them and the
+       copy constructor is fatal for them -- so whoever is about to declare a GPU write is the
+       one that has to ask. */
+    bool planeIsUnique(int plane) const {
+        return plane >= 0 && plane < numPlanes && plane < 3 && data[plane] && data[plane]->unique();
+    }
+
     /* The device the planes live on, for the export path; null on CPU frames. */
     VSVulkanDevice *getGPUDevice() const {
         return numPlanes ? data[0]->gpuDevice : nullptr;

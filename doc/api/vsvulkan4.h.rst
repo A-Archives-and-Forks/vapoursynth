@@ -775,9 +775,11 @@ void setGPUPlaneProducer(VSFrame \*frame, int plane, VSGPUTimeline_ \*timeline, 
    The plane takes its own reference on the timeline, so publishing needs no
    reference of yours to be kept afterwards, and you may release yours as
    soon as you are done signalling. Passing NULL publishes the plane as host
-   ready. Only ever call this on frames you are producing. On an exec pool's
-   timeline *value* must be one the pool has submitted, the *signaledValue*
-   of a gpuExecSubmit_ call; a larger value is fatal.
+   ready. Only ever call this on frames you are producing: a plane the frame
+   shares with another is fatal here, for the reason gpuExecWritesPlane_
+   gives. On an exec pool's timeline *value* must be one the pool has
+   submitted, the *signaledValue* of a gpuExecSubmit_ call; a larger value is
+   fatal.
 
 ----------
 
@@ -1149,6 +1151,15 @@ void gpuExecWritesPlane(VSGPUExecContext_ \*context, VSFrame \*frame, int plane)
 
    Declares that this submission writes the plane: gpuExecSubmit_ publishes
    the pool's (timeline, value) on it as the producer pair.
+
+   The frame must own the plane outright. Copying a frame shares its planes,
+   and a GPU plane has no copy on write, so a write declared on a shared plane
+   would land in the other frame as well and the producer pair published on it
+   would replace theirs. Both are silent, so this is fatal instead. Copy a
+   frame only to inherit properties you then keep; to write, take
+   newGPUVideoFrame_ or newVideoFrame2 with the old frame as the property
+   source. Sharing a plane this filter does not write stays fine, the check
+   being per plane.
 
 ----------
 

@@ -3576,7 +3576,14 @@ cdef class Core(object):
         self.ensure_valid()
         cdef const VSVULKANAPI *vk = self.funcs.getVulkanAPI()
         cdef char err[512]
-        if vk.setVulkanDevice(self.core, index, err, 512):
+        cdef int failed
+        # released gil, same reason as log_message: this creates the device, which logs -- its
+        # own line, and every driver and validation message -- while holding vulkanDeviceLock,
+        # and the log handlers acquire the gil. Holding it here deadlocks against any thread
+        # already inside device creation, and makes this call the one that starves it.
+        with nogil:
+            failed = vk.setVulkanDevice(self.core, index, err, 512)
+        if failed:
             raise Error(err.decode('utf-8'))
 
     @property
@@ -3607,7 +3614,11 @@ cdef class Core(object):
         cdef char err[512]
         # Sized by a first call so the device count can never truncate the list; the
         # docstring's index promise only holds if every device is present.
-        cdef int count = vk.enumerateVulkanDevices(NULL, 0, err, 512)
+        cdef int count
+        # released gil: enumeration brings up the loader and a temporary instance, which is
+        # long enough to matter even though it touches no core lock.
+        with nogil:
+            count = vk.enumerateVulkanDevices(NULL, 0, err, 512)
         if count < 0:
             raise Error(err.decode('utf-8'))
         if count == 0:
@@ -3619,7 +3630,8 @@ cdef class Core(object):
         type_names = {0: 'other', 1: 'integrated', 2: 'discrete', 3: 'virtual', 4: 'cpu'}
         result = []
         try:
-            fetched = vk.enumerateVulkanDevices(entries, count, err, 512)
+            with nogil:
+                fetched = vk.enumerateVulkanDevices(entries, count, err, 512)
             if fetched < 0:
                 raise Error(err.decode('utf-8'))
             for i in range(min(count, fetched)):
@@ -3644,7 +3656,14 @@ cdef class Core(object):
         cdef const VSVULKANAPI *vk = self.funcs.getVulkanAPI()
         cdef VSVulkanCoreInfo info
         cdef char err[512]
-        if vk.getVulkanCoreInfo(self.core, &info, err, 512):
+        cdef int failed
+        # released gil: this initializes the device on first access, so it can be the thread
+        # holding vulkanDeviceLock and logging under it; and when another thread got there
+        # first it waits for that lock, which must not be done while holding the gil that
+        # thread's log handler is trying to acquire.
+        with nogil:
+            failed = vk.getVulkanCoreInfo(self.core, &info, err, 512)
+        if failed:
             raise Error(err.decode('utf-8'))
         return { 'name': (<bytes>(<char *>info.deviceName)).decode('utf-8'),
                  'device_memory': info.deviceMemory, 'budget': info.budget,

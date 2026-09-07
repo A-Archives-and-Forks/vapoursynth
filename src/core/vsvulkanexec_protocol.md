@@ -32,14 +32,16 @@ pool has one context per staging slot and never retains anything.
 | `VSVulkanDevice::execPoolsMutex` + `execReleaseCv` | the pool registry, the batch registry, `nextExecReleaseBatch`, creation of the progress semaphore |
 | `VSVulkanExecPool::claimMutex` + `claimCv` | nothing but the rendezvous between a full ring and `releaseClaim`; the claim itself is the atomic `claimed` |
 | `VSVulkanQueue` | `vkQueueSubmit2`, `nextValue`, `execProgressNext` |
+| `VSVulkanDevice::flushMutex` | the device's one flush context -- its command pool, buffer, timeline and value -- held across the flush submission and the host wait for it |
 | allocator mutex | blocks and free lists |
 | `VSCore::cacheLock` | the set of nodes with caches |
 | `VSNode::cacheMutex` | one node's cache and consumer list |
 
 Order, outermost first: `execPoolsMutex` before `claimMutex` (a device sweep releases claims
 while walking the registry) and before the queue lock (`detachCompleted` reads `nextValue` for
-the counter check); `cacheLock` before `cacheMutex` (eviction); the queue lock and the allocator
-mutex take nothing themselves. `registerCache` is called
+the counter check); `flushMutex` before the queue lock, which the flush takes while holding it;
+`cacheLock` before `cacheMutex` (eviction); the queue lock and the allocator mutex take nothing
+themselves. `registerCache` is called
 after `cacheMutex` is released, never under it. **No lock in this table is held while a release
 callback runs**, and `execPoolsMutex` is never held while calling into anything a plugin wrote.
 Frame property maps refuse nodes and functions (I25), so freeing a frame, which happens under

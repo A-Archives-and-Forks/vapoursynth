@@ -57,6 +57,40 @@ class FilterTestSequenceGPU(GPUTestMixin, FilterTestSequence):
 # Run in a fresh interpreter with VS_VULKAN_FORCE_STAGING set: the staging rings only exist on
 # the staging paths, which that switch selects everywhere, and it is read when the device is
 # created. Prints grown, shrunk, released, recreated and the unified memory flag.
+# Run in a fresh interpreter, because the deadlock it looks for only exists while the Vulkan
+# device is still being created. A worker builds the first GPU filter, which takes
+# vulkanDeviceLock and logs under it through a handler that needs the GIL; the main thread then
+# reads a Vulkan property. If that property holds the GIL while it waits for the lock the whole
+# interpreter stops, watchdog thread included, so the timeout on the subprocess is the check
+# rather than anything the probe can print from inside a wedged process.
+GIL_DEVICE_PROBE = '''
+import threading
+import time
+import vapoursynth as vs
+
+core = vs.core
+started = threading.Event()
+built = threading.Event()
+
+
+def build():
+    started.set()
+    clip = core.std.BlankClip(width=32, height=32, format=vs.GRAY8, length=1)
+    core.std.GPUUpload(clip)   # the first GPU filter is what creates the device
+    built.set()
+
+
+worker = threading.Thread(target=build, daemon=True)
+worker.start()
+started.wait()
+time.sleep(0.02)               # let the worker get inside device creation
+name = core.vulkan_device_info["name"]
+core.set_vulkan_device        # the other entry point that takes the same lock
+built.wait(30)
+print("PROBE_OK", built.is_set(), len(name) > 0)
+'''
+
+
 STAGING_PROBE = '''
 import time
 import vapoursynth as vs
@@ -175,6 +209,20 @@ class KernelRegressionTests(unittest.TestCase):
             with cpu.get_frame(0) as a, gpu.get_frame(0) as b:
                 for p in range(3):
                     self.assertAlmostEqual(a[p][0, 0], b[p][0, 0], places=5, msg=matrix)
+
+    @unittest.skipUnless(HAVE_GPU, "no Vulkan device")
+    def test_vulkan_property_does_not_deadlock_against_first_device_use(self):
+        # A Vulkan binding that keeps the GIL while the core waits for vulkanDeviceLock deadlocks
+        # against the thread creating the device, which logs under that lock into a handler that
+        # wants the GIL. Everything here is ordinary: one GPUUpload construction, one property
+        # read, no frame requested. The subprocess timeout is the assertion -- a regression wedges
+        # the child completely, so it cannot report anything itself.
+        result = subprocess.run([sys.executable, "-c", GIL_DEVICE_PROBE], capture_output=True,
+                                text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Matched loosely on purpose: the core logs to stdout in some configurations, so a
+        # positional split of this output would fail for reasons that are not the test's.
+        self.assertIn("PROBE_OK True True", result.stdout, result.stdout + result.stderr)
 
     @unittest.skipUnless(HAVE_GPU, "no Vulkan device")
     def test_transfer_staging_accounted_sized_to_demand_and_released_when_idle(self):

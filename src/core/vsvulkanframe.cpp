@@ -52,8 +52,13 @@ constexpr uint32_t demandEpoch = 64;
 VSVulkanTransfer::~VSVulkanTransfer() {
     if (!dev)
         return;
+    /* The slot buffers are the source and destination of copies that may still be running;
+       the same rule as the exec pool's destructor applies, and for the same reason. Leaving
+       them costs the rings' staging until the device goes, which beats recycling memory a
+       copy is reading. */
     std::string ignored;
-    execPool.waitAll(ignored);
+    if (!execPool.waitAll(ignored) && !dev->deviceLost())
+        return;
     for (auto &slot : staging.slots)
         dev->destroyBuffer(slot->buffer);
     for (auto &slot : readback.slots)
@@ -115,14 +120,9 @@ bool VSVulkanTransfer::waitPlanesHost(VSVulkanPlane *const planes[], int numPlan
         semaphores[i] = list.data()[i].semaphore;
         values[i] = list.data()[i].value;
     }
-    VkSemaphoreWaitInfo waitInfo = {};
-    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-    waitInfo.semaphoreCount = list.size();
-    waitInfo.pSemaphores = semaphores.data();
-    waitInfo.pValues = values.data();
-    VkResult res = dev->vk.vkWaitSemaphores(dev->device(), &waitInfo, UINT64_MAX);
-    if (res != VK_SUCCESS) {
-        errorMessage = "vkWaitSemaphores failed (VkResult " + std::to_string(res) + ")";
+    if (!dev->waitTimelines(semaphores.data(), values.data(), list.size())) {
+        errorMessage = dev->deviceLost() ? VSVulkanDevice::deviceLostMessage()
+            : "waiting for a plane's producer failed and could not be retried";
         return false;
     }
     return true;

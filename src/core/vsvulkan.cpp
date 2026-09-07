@@ -952,6 +952,46 @@ bool VSVulkanDevice::exportSemaphore(VkSemaphore semaphore, intptr_t &handle, st
     return true;
 }
 
+bool VSVulkanDevice::waitTimelines(const VkSemaphore *semaphores, const uint64_t *values, uint32_t count) {
+    if (!count)
+        return true;
+    if (deviceLost())
+        return false;
+    VkSemaphoreWaitInfo waitInfo = {};
+    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    waitInfo.semaphoreCount = count;
+    waitInfo.pSemaphores = semaphores;
+    waitInfo.pValues = values;
+    for (int attempt = 0; attempt < 16; attempt++) {
+        VkResult res = vk.vkWaitSemaphores(deviceHandle, &waitInfo, UINT64_MAX);
+        if (res == VK_SUCCESS) {
+            /* Returning is not proof the work ran. A reset force-signals every timeline past
+               everything, so any wait on one is satisfied at once by a value no submission
+               produced -- which is how a wait could report a frame complete that the GPU
+               abandoned. Ask what value actually satisfied it: one counter query per
+               semaphore, nothing against the ~0.2 ms a submission costs, at the one point
+               where "the GPU finished" becomes a fact the caller acts on. */
+            for (uint32_t i = 0; i < count; i++) {
+                uint64_t reached = 0;
+                if (vk.vkGetSemaphoreCounterValue(deviceHandle, semaphores[i], &reached) == VK_SUCCESS &&
+                        reached >= resetTimelineValue) {
+                    markDeviceLost();
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (res == VK_ERROR_DEVICE_LOST) {
+            markDeviceLost();
+            return false;
+        }
+        /* Out of host or device memory, the only other results this call has. Give the
+           allocator a moment rather than spinning on it. */
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
 bool VSVulkanDevice::flushDeviceWrites(const VkSemaphore *waitSemaphores, const uint64_t *waitValues, uint32_t waitCount,
     std::string &errorMessage) {
     std::lock_guard<std::mutex> lock(flushMutex);
@@ -1009,7 +1049,24 @@ bool VSVulkanDevice::flushDeviceWrites(const VkSemaphore *waitSemaphores, const 
         }
     }
 
-    vk.vkResetCommandBuffer(flushCmd, 0);
+    /* The one flush context is shared by every caller, and a failed wait leaves its command
+       buffer pending: the submission was accepted and the GPU may still be executing it, so
+       resetting it for the next caller is invalid usage. Settle that first, and refuse rather
+       than reset if it cannot be settled -- the caller gets an error, and the next one tries
+       again, which is what a transient allocation failure deserves. */
+    if (flushPending) {
+        if (!waitTimelines(&flushTimeline, &flushValue, 1)) {
+            errorMessage = deviceLost() ? deviceLostMessage()
+                : "the previous flush submission is still pending and waiting for it failed";
+            return false;
+        }
+        flushPending = false;
+    }
+
+    if (vk.vkResetCommandBuffer(flushCmd, 0) != VK_SUCCESS) {
+        errorMessage = "vkResetCommandBuffer failed for the flush";
+        return false;
+    }
     VkCommandBufferBeginInfo begin = {};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1066,16 +1123,16 @@ bool VSVulkanDevice::flushDeviceWrites(const VkSemaphore *waitSemaphores, const 
         errorMessage = "vkQueueSubmit2 failed for the flush (VkResult " + std::to_string(res) + ")";
         return false;
     }
+    /* Accepted, so from here the command buffer is the GPU's until this value is reached.
+       A failed submit signals nothing and leaves the value burned, which is harmless: gaps
+       are legal on a timeline and the next call signals a higher one. */
+    flushPending = true;
 
-    VkSemaphoreWaitInfo waitInfo = {};
-    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-    waitInfo.semaphoreCount = 1;
-    waitInfo.pSemaphores = &flushTimeline;
-    waitInfo.pValues = &flushValue;
-    if (vk.vkWaitSemaphores(deviceHandle, &waitInfo, UINT64_MAX) != VK_SUCCESS) {
-        errorMessage = "Waiting for the flush submission failed";
+    if (!waitTimelines(&flushTimeline, &flushValue, 1)) {
+        errorMessage = deviceLost() ? deviceLostMessage() : "waiting for the flush submission failed";
         return false;
     }
+    flushPending = false;
     return true;
 }
 

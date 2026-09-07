@@ -475,6 +475,22 @@ public:
        created exportable or the driver rejects the call. */
     bool exportSemaphore(VkSemaphore semaphore, intptr_t &handle, std::string &errorMessage);
 
+    /* One wait policy for everything that has to establish GPU completion before recycling
+       or destroying what a submission still uses. vkWaitSemaphores fails in two very different
+       ways and the difference decides what the caller may do next: a device reset, recognised
+       and recorded here, after which nothing is executing and retirement is safe; or a host or
+       device allocation failure inside the wait itself, which establishes nothing at all --
+       releasing a retention on that basis hands a region back to the allocator while the GPU
+       may still be reading it, and destroying a command pool with a pending buffer is invalid
+       usage outright. An allocation failure is worth retrying, since a wait needs very little
+       and the shortage may pass, but only for a bounded while: a wait that cannot allocate
+       will not be fixed by waiting longer, and every caller has a safe fallback for giving up.
+
+       Returns true only when completion is established. Deliberately takes no error string:
+       the callers that most need it are destructors, where composing a message is one more
+       allocation that can fail. */
+    bool waitTimelines(const VkSemaphore *semaphores, const uint64_t *values, uint32_t count);
+
     /* Makes writes available outside the device's own domain: one tiny submission that
        device-waits the given timeline pairs, then executes an ALL_COMMANDS/MEMORY_WRITE to
        HOST/HOST_READ barrier, host waited. The spec does not grant cross device availability
@@ -703,6 +719,10 @@ private:
     VkCommandBuffer flushCmd = VK_NULL_HANDLE;
     VkSemaphore flushTimeline = VK_NULL_HANDLE;
     uint64_t flushValue = 0;
+    /* Whether flushValue names a submission the GPU may still be running. A failed wait leaves
+       one behind, and the next caller may not reset the shared command buffer until it is
+       settled. */
+    bool flushPending = false;
     uint8_t uuid[VK_UUID_SIZE] = {};
     uint8_t luid[VK_LUID_SIZE] = {};
     uint32_t nodeMask = 0;

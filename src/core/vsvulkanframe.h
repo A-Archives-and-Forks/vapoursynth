@@ -97,12 +97,7 @@ inline bool waitPlaneHost(VSVulkanDevice &device, const VSVulkanPlane &plane) {
     if (!plane.readyTimeline)
         return true;
     VkSemaphore semaphore = plane.readyTimeline->semaphore();
-    VkSemaphoreWaitInfo waitInfo = {};
-    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-    waitInfo.semaphoreCount = 1;
-    waitInfo.pSemaphores = &semaphore;
-    waitInfo.pValues = &plane.readyValue;
-    return device.vk.vkWaitSemaphores(device.device(), &waitInfo, UINT64_MAX) == VK_SUCCESS;
+    return device.waitTimelines(&semaphore, &plane.readyValue, 1);
 }
 
 /* Moves frames across the PCIe bus. Uploads memcpy straight into the plane buffer when it

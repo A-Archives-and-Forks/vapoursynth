@@ -90,9 +90,9 @@ set from that result alone would never be set; the force signal is the only obse
 
 It is also unmistakable, since a pool would need 2^64 submissions to reach it. `detachCompleted`
 and the admission gate therefore test for `VSVulkanDevice::resetTimelineValue` and set the
-device's one-way `deviceLost` flag, and `waitValue` tests the counter that actually satisfied a
-successful wait, so the call that discovers the reset is not also the one that reports work
-complete. From then on `acquire`, `submit`, `waitValue`, `waitAll` and `flushDeviceWrites` fail
+device's one-way `deviceLost` flag, and `waitTimelines` -- the single wait policy every host
+wait goes through (I30) -- tests the counter that actually satisfied a successful wait, so the
+call that discovers the reset is never also the one that reports work complete. From then on `acquire`, `submit`, `waitValue`, `waitAll` and `flushDeviceWrites` fail
 with `deviceLostMessage`, which travels the ordinary filter error path; the sweeps stop reaping
 and the gate returns at once rather than spinning on a progress counter whose `counter + 1`
 wraps to zero. What a pool still retains is released by its destructor, which is safe because
@@ -101,6 +101,17 @@ after a reset nothing is reading it.
 Before this the counter check called a reset a protocol violation and `vulkanFatal` terminated
 the process -- and a TDR resets every context on the machine, so any application's runaway
 shader killed every running core.
+
+The other half is what a *failed* wait means, which is not one thing (I30). `vkWaitSemaphores`
+returns only `VK_SUCCESS`, `VK_ERROR_DEVICE_LOST` and the two allocation failures, and the last
+two establish nothing at all: releasing a retention on that basis hands a region back to the
+allocator while the GPU may still be reading it, and destroying a command pool with a pending
+buffer, or resetting the shared flush buffer under one, is invalid usage outright. So
+`waitTimelines` retries an allocation failure a bounded number of times -- a wait needs very
+little and the shortage may pass, but one that cannot allocate will not be fixed by waiting
+longer -- and every caller that gives up has a safe fallback: the destructors retire nothing
+and leave their objects to the device, whose reference they hold, and the flush refuses the
+call rather than reusing a pending buffer.
 
 ## 3. Context life cycle
 
@@ -280,6 +291,7 @@ rung 1 waits.
 | I18 | `waitAll` (idle wait and destruction) only from a thread holding no context of the pool. | `failIfHoldingContext` in `waitAll` |
 | I19 | A pool is never destroyed while any thread holds one of its contexts. | `failIfAnyContextHeld` in the destructor, after unregistration, when a claim can only mean a thread still using the pool |
 | I20 | The pool's timeline advances only through the pool's own submissions: its counter never exceeds what the pool handed to the queue, except at `resetTimelineValue`, which means a GPU reset (I29). | the check in `detachCompleted`, counter read first and `queuedCeiling` after it; the ceiling is stored before the submission that signals it, so it is never behind the counter and the check never fires on a correct program |
+| I30 | Nothing is retired on a wait that did not establish completion. A retention is released, a command pool or buffer destroyed and the shared flush command buffer reset only after the wait succeeded, or after a reset, when nothing is executing. | `VSVulkanDevice::waitTimelines` is the single wait policy: it retries an allocation failure, recognises a reset, and returns true only on established completion. `~VSVulkanExecPool`, `~VSVulkanTransfer` and `~VSPlaneData` retire conditionally on it and otherwise leave their objects to the device's own destruction; `flushDeviceWrites` tracks `flushPending` and settles it before reusing the buffer |
 | I29 | A GPU reset is recognised, reported and survivable: no wait claims work completed that did not, no call spins, every retention is still released exactly once, and the core destructs. | `UINT64_MAX` on any pool or progress timeline sets the device's `deviceLost` flag, after which `acquire`, `submit`, `waitValue`, `waitAll` and `flushDeviceWrites` fail with `deviceLostMessage`, the sweeps stop reaping and the gate returns; retentions go back in `~VSVulkanExecPool` |
 | I21 | Every metered byte belongs to a submission whose completion signals the progress timeline. | `retain` adds bytes only on a pool with `signalsProgress` |
 | I22 | A context handle is usable exactly from its acquire to the submit or abandon that ends it; any later use is fatal, never a read of freed memory. | the handle lives in the ring slot, bound once at creation; every public entry point runs `failUnlessOwner` first, whose empty-owner case names an ended recording; the wrapper moves the handle's lists out before `submit` drops the claim |

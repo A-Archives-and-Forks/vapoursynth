@@ -34,9 +34,21 @@ VSVulkanExecPool::~VSVulkanExecPool() {
        the pool after it drops the claim. The core never destroys a node while a frame
        request on it runs, so this only ever names a bug. */
     failIfAnyContextHeld("freeGPUExecPool");
+    /* Everything below retires what the GPU may still be using, so it may only run once
+       completion is established. waitAll fails for two reasons and they differ here: after a
+       device reset nothing is executing and all of it may go, while an allocation failure
+       inside the wait establishes nothing -- running a release callback there hands a region
+       back to the allocator under a live read, and destroying a command pool with a pending
+       buffer is invalid usage. In that case retire nothing and leave both to the device's own
+       destruction, which the pool's reference keeps reachable; the bytes are still settled, or
+       an admission gate that outlives this pool would wait forever on work nobody will reap. */
     std::string ignored;
-    waitAll(ignored);
+    const bool completed = waitAll(ignored) || dev->deviceLost();
     for (auto &context : contexts) {
+        if (!completed) {
+            settleRetained(*context);
+            continue;
+        }
         releaseRetained(*context);
         if (context->commandPool)
             dev->vk.vkDestroyCommandPool(dev->device(), context->commandPool, nullptr);
@@ -516,33 +528,12 @@ bool VSVulkanExecPool::waitValue(uint64_t value, std::string &errorMessage) {
         return false;
     }
     VkSemaphore semaphore = timeline->semaphore();
-    VkSemaphoreWaitInfo waitInfo = {};
-    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-    waitInfo.semaphoreCount = 1;
-    waitInfo.pSemaphores = &semaphore;
-    waitInfo.pValues = &value;
-    VkResult res = dev->vk.vkWaitSemaphores(dev->device(), &waitInfo, UINT64_MAX);
-    if (res != VK_SUCCESS) {
-        /* The conforming half of the same story: a driver that does report the loss reports it
-           here, and the rest of the core learns it the same way as from the force signal. */
-        if (res == VK_ERROR_DEVICE_LOST) {
-            dev->markDeviceLost();
-            errorMessage = VSVulkanDevice::deviceLostMessage();
-        } else {
-            errorMessage = "vkWaitSemaphores failed (VkResult " + std::to_string(res) + ")";
-        }
-        return false;
-    }
-    /* Returning is not proof the work ran. A reset force-signals the timeline past everything,
-       so every wait on it is satisfied at once by a value no submission produced -- which is
-       how a wait could report a frame complete that the GPU abandoned. Ask what value actually
-       satisfied it: one counter query, which is nothing against the ~0.2 ms a submission
-       costs, at the one point where "the GPU finished" becomes a fact the caller acts on. */
-    uint64_t reached = 0;
-    if (dev->vk.vkGetSemaphoreCounterValue(dev->device(), semaphore, &reached) == VK_SUCCESS &&
-            reached >= VSVulkanDevice::resetTimelineValue) {
-        dev->markDeviceLost();
-        errorMessage = VSVulkanDevice::deviceLostMessage();
+    /* Through the device's wait policy, which retries an allocation failure and recognises the
+       conforming half of a device loss -- a driver that does report it reports it here, and
+       the rest of the core then learns it the same way as from the force signal. */
+    if (!dev->waitTimelines(&semaphore, &value, 1)) {
+        errorMessage = dev->deviceLost() ? VSVulkanDevice::deviceLostMessage()
+            : "waiting for a GPU submission failed and could not be retried";
         return false;
     }
     return true;

@@ -775,8 +775,8 @@ const std::string &VSPluginFunction::getReturnType() const {
     return returnType;
 }
 
-VSNode::VSNode(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree freeFunc, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, VSCore *core) :
-    refcount(1), nodeType(mtVideo), instanceData(instanceData), name(name), filterGetFrame(getFrame), freeFunc(freeFunc), filterMode(filterMode), core(core), serialFrame(-1), processingTime(0) {
+VSNode::VSNode(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree freeFunc, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, bool gpuOutput, VSCore *core) :
+    refcount(1), nodeType(mtVideo), instanceData(instanceData), name(name), filterGetFrame(getFrame), freeFunc(freeFunc), filterMode(filterMode), gpuOutput(gpuOutput), core(core), serialFrame(-1), processingTime(0) {
 
     if (!core->isValidVideoInfo(*vi))
         throw VSException("The VSVideoInfo structure passed by " + name + " is invalid.");
@@ -2165,18 +2165,18 @@ void VSCore::loadPlugin(const std::filesystem::path &filename, bool loadCPUOptim
     p.release();
 }
 
-void VSCore::createVideoFilter(VSMap *out, const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData) {
+void VSCore::createVideoFilter(VSMap *out, const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, bool gpuOutput) {
     try {
-        VSNode *node = new VSNode(name, vi, getFrame, free, filterMode, dependencies, numDeps, instanceData, this);
+        VSNode *node = new VSNode(name, vi, getFrame, free, filterMode, dependencies, numDeps, instanceData, gpuOutput, this);
         vs_internal_vsapi.mapConsumeNode(out, "clip", node, maAppend);
     } catch (VSException &e) {
         vs_internal_vsapi.mapSetError(out, e.what());
     }
 }
 
-VSNode *VSCore::createVideoFilter(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData) {
+VSNode *VSCore::createVideoFilter(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, bool gpuOutput) {
     try {
-        return new VSNode(name, vi, getFrame, free, filterMode, dependencies, numDeps, instanceData, this);
+        return new VSNode(name, vi, getFrame, free, filterMode, dependencies, numDeps, instanceData, gpuOutput, this);
     } catch (VSException &) {
         return nullptr;
     }

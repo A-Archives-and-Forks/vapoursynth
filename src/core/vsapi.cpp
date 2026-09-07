@@ -819,12 +819,12 @@ static void VS_CC getCoreInfo2(VSCore *core, VSCoreInfo2 *info) VS_NOEXCEPT {
 
 static void VS_CC createVideoFilter(VSMap *out, const char *name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, int filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, VSCore *core) VS_NOEXCEPT {
     assert(out && name && vi && getFrame && core);
-    core->createVideoFilter(out, name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData);
+    core->createVideoFilter(out, name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData, false);
 }
 
 static VSNode *VS_CC createVideoFilter2(const char *name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, int filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, VSCore *core) VS_NOEXCEPT {
     assert(name && vi && getFrame && core);
-    return core->createVideoFilter(name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData);
+    return core->createVideoFilter(name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData, false);
 }
 
 static void VS_CC createAudioFilter(VSMap *out, const char *name, const VSAudioInfo *ai, VSFilterGetFrame getFrame, VSFilterFree free, int filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, VSCore *core) VS_NOEXCEPT {
@@ -843,13 +843,10 @@ static void VS_CC createVideoFilterEx(VSMap *out, const char *name, const VSVide
         vs_internal_vsapi.mapSetError(out, (std::string(name) + ": unknown filter flags passed to createVideoFilterEx").c_str());
         return;
     }
-    core->createVideoFilter(out, name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData);
-    if ((flags & ffGPUOutput) && !vs_internal_vsapi.mapGetError(out)) {
-        int numElems = vs_internal_vsapi.mapNumElements(out, "clip");
-        VSNode *node = vs_internal_vsapi.mapGetNode(out, "clip", numElems - 1, nullptr);
-        node->setGPUOutput();
-        vs_internal_vsapi.freeNode(node);
-    }
+    /* Passed into construction rather than set on the finished node: the constructor
+       registers the node with the cache sweeps, so a flag set out here would be a plain bool
+       written after other threads could already read it. */
+    core->createVideoFilter(out, name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData, (flags & ffGPUOutput) != 0);
 }
 
 static VSNode *VS_CC createVideoFilterEx2(const char *name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, int filterMode, int flags, const VSFilterDependency *dependencies, int numDeps, void *instanceData, VSCore *core) VS_NOEXCEPT {
@@ -858,10 +855,7 @@ static VSNode *VS_CC createVideoFilterEx2(const char *name, const VSVideoInfo *v
         core->logMessage(mtCritical, std::string(name) + ": unknown filter flags passed to createVideoFilterEx2");
         return nullptr;
     }
-    VSNode *node = core->createVideoFilter(name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData);
-    if (node && (flags & ffGPUOutput))
-        node->setGPUOutput();
-    return node;
+    return core->createVideoFilter(name, vi, getFrame, free, static_cast<VSFilterMode>(filterMode), dependencies, numDeps, instanceData, (flags & ffGPUOutput) != 0);
 }
 
 static int VS_CC setLinearFilter(VSNode *node) VS_NOEXCEPT {

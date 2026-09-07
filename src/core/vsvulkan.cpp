@@ -1301,10 +1301,15 @@ bool VSVulkanDevice::ensureExecProgressSemaphore() {
 }
 
 void VSVulkanDevice::execAdmissionGate() {
-    const uint64_t budget = execRetainedBudget.load(std::memory_order_relaxed);
-    if (!budget || execRetainedBytes.load(std::memory_order_relaxed) <= budget)
-        return;
     for (;;) {
+        /* Read every round rather than once before the loop. setMaxVRAMUse moves this budget,
+           and a thread already asleep here has to see the new one: with a snapshot, raising
+           the limit let new arrivals straight through while an older waiter kept testing the
+           threshold it had entered on, sleeping out its poll for room it already had. Zero
+           disables the gate, so that is tested here too rather than only on the way in. */
+        const uint64_t budget = execRetainedBudget.load(std::memory_order_relaxed);
+        if (!budget || execRetainedBytes.load(std::memory_order_relaxed) <= budget)
+            return;
         /* Nothing will complete again, and the bytes belong to submissions that never will,
            so waiting for them is waiting forever. */
         if (deviceLost())

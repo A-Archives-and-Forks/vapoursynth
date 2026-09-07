@@ -987,7 +987,12 @@ private:
     PVSFrame getFrameInternal(int n, int activationReason, VSFrameContext *frameCtx);
     void updateTransientAllocEstimate(int64_t hostSample, int64_t gpuSample);
 public:
-    VSNode(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, VSCore *core);
+    /* gpuOutput is a constructor argument rather than a setter because the constructor
+       publishes the node: it ends in registerCache, and a fresh node has no consumers so
+       cacheEnabled is always true there. Setting the flag afterwards left every GPU node
+       visible to the cache sweeps for a moment with the wrong residency, and the write raced
+       the sweep's read of it. */
+    VSNode(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, bool gpuOutput, VSCore *core);
     VSNode(const std::string &name, const VSAudioInfo *ai, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, VSCore *core);
     ~VSNode();
 
@@ -1015,11 +1020,6 @@ public:
 
     bool isGPUOutput() const {
         return gpuOutput;
-    }
-
-    void setGPUOutput() {
-        assert(nodeType == mtVideo);
-        gpuOutput = true;
     }
 
     int64_t getProcessingTime(bool reset) {
@@ -1303,8 +1303,8 @@ public:
     void loadPlugin(const std::filesystem::path &filename, bool loadCPUOptimized = false, const std::string &forcedNamespace = std::string(), const std::string &forcedId = std::string(), bool altSearchPath = false);
     bool loadAllPluginsInPath(const std::filesystem::path &path, bool pluginRoot = false);
 
-    void createVideoFilter(VSMap *out, const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData);
-    VSNode *createVideoFilter(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData);
+    void createVideoFilter(VSMap *out, const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, bool gpuOutput);
+    VSNode *createVideoFilter(const std::string &name, const VSVideoInfo *vi, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData, bool gpuOutput);
     void createAudioFilter(VSMap *out, const std::string &name, const VSAudioInfo *ai, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData);
     VSNode *createAudioFilter(const std::string &name, const VSAudioInfo *ai, VSFilterGetFrame getFrame, VSFilterFree free, VSFilterMode filterMode, const VSFilterDependency *dependencies, int numDeps, void *instanceData);
 

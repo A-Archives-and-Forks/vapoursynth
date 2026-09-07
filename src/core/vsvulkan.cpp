@@ -1162,6 +1162,17 @@ void VSVulkanDevice::failIfRunningReleasesLocked(const char *what) const {
     }
 }
 
+void VSVulkanDevice::failIfHoldingForeignContext(const VSVulkanExecPool *self, const char *what) {
+    std::lock_guard<std::mutex> lock(execPoolsMutex);
+    for (const VSVulkanExecPool *pool : execPools) {
+        if (pool == self || !pool->holdsContextOwnedByThisThread())
+            continue;
+        std::string message = std::string(what) +
+            " called by a thread already holding a context of another pool; hold one at a time and let a timeline value carry the dependency";
+        vulkanFatal(message.c_str());
+    }
+}
+
 void VSVulkanDevice::failIfRunningReleases(const char *what) {
     std::lock_guard<std::mutex> lock(execPoolsMutex);
     failIfRunningReleasesLocked(what);

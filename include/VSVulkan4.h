@@ -680,11 +680,14 @@ struct VSVULKANAPI {
        loss. Every acquire must end in exactly one submit or abandon, from the thread that
        acquired; retaining, submitting or abandoning from any other thread is fatal, and so
        is any call with the handle after the submit or abandon that ended it. One
-       context of a pool per thread: the ring has only two to eight contexts, so a second
-       acquire from a thread already holding one could only wait for a slot that, once every
-       worker did the same, nobody would ever release, and it is fatal instead. Holding
-       contexts of different pools at once is fine, and the in-flight budget counts submitted
-       work only, so a recording never gates the thread holding it. */
+       context per thread, of this or any other pool: a ring has only two to eight contexts,
+       so a second acquire from a thread already holding one could only wait for a slot that,
+       once every worker did the same, nobody would ever release, and two threads each waiting
+       on the other's full ring hang the same way. It is fatal instead, reported when the
+       second acquire would wait. Nothing is lost by it: a dependency between two pools is
+       carried by a timeline value, so submit and release the first recording, then acquire
+       the second and wait on the value the first signalled. The in-flight budget counts
+       submitted work only, so a recording never gates the thread holding it. */
     VSGPUExecContext *(VS_CC *gpuExecAcquire)(VSGPUExecPool *pool, char *errorMessage, int errorMessageSize) VS_NOEXCEPT;
     /* The command buffer being recorded: put anything Vulkan allows into it. */
     VkCommandBuffer (VS_CC *gpuExecCommandBuffer)(VSGPUExecContext *context) VS_NOEXCEPT;

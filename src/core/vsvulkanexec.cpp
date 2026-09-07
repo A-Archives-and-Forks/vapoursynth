@@ -75,13 +75,19 @@ void VSVulkanExecPool::failIfAnyContextHeld(const char *what) const {
     }
 }
 
-void VSVulkanExecPool::failIfHoldingContext(const char *what) const {
+bool VSVulkanExecPool::holdsContextOwnedByThisThread() const {
     const std::thread::id me = std::this_thread::get_id();
     for (const auto &context : contexts) {
-        if (context->claimed.load(std::memory_order_relaxed) && context->owner.load(std::memory_order_acquire) == me) {
-            std::string message = std::string(what) + " called by a thread already holding a context of the pool";
-            vulkanFatal(message.c_str());
-        }
+        if (context->claimed.load(std::memory_order_relaxed) && context->owner.load(std::memory_order_acquire) == me)
+            return true;
+    }
+    return false;
+}
+
+void VSVulkanExecPool::failIfHoldingContext(const char *what) const {
+    if (holdsContextOwnedByThisThread()) {
+        std::string message = std::string(what) + " called by a thread already holding a context of the pool";
+        vulkanFatal(message.c_str());
     }
 }
 
@@ -281,8 +287,17 @@ VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
     }
 
     /* Slow path: more threads than contexts, so wait for a release. This is the intended
-       backpressure when a filter is called on more threads than it keeps frames in flight. */
+       backpressure when a filter is called on more threads than it keeps frames in flight.
+
+       Waiting is also the only place the pools can deadlock among themselves: a thread that
+       holds another pool's context and waits here, while a thread holding one of this pool's
+       waits on that one, leaves two full rings neither of which can free a slot. One context
+       per pool per thread was already fatal for the same reason within a ring; this is the
+       same rule across rings, and nothing needs the freedom it removes, since a dependency
+       between two pools is a timeline value rather than two open recordings. The fast path
+       above skips the check: it never waits, and walking the registry costs a lock. */
     if (!context) {
+        dev->failIfHoldingForeignContext(this, "gpuExecAcquire");
         std::unique_lock<std::mutex> lock(claimMutex);
         claimCv.wait(lock, [&]() {
             for (auto &candidate : contexts) {

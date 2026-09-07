@@ -161,8 +161,9 @@ rung 1 waits.
   submit and abandon from any other thread are fatal.
 - A context handle is dead after the submit or abandon that ended it; any call with it
   afterwards is fatal.
-- One context of a pool per thread, fatal otherwise; contexts of different pools may be held
-  together. The in-flight budget counts submitted work only.
+- One context per thread, of this or any other pool, fatal otherwise: within a ring at the
+  second acquire, across rings when that acquire would wait. The in-flight budget counts
+  submitted work only.
 - Retain only between acquire and submit.
 - A release callback runs on whichever thread reaps it, possibly inside the filter's own
   `getFrame` (a gated acquire or a failed allocation sweeps), with no core lock held. It may take
@@ -195,6 +196,7 @@ rung 1 waits.
 | I14 | A retained GPU frame outlives its submission; its bytes are its whole size. | `vkGPUExecReadsFrame` |
 | I15 | A release callback only frees: no acquire, GPU allocation, pool creation, pool free or pool wait from a thread running a batch. | `failIfRunningReleases` in `acquire`, `allocatePooled`, `registerExecPool`, `unregisterExecPool`, `waitAll` |
 | I16 | One context per pool per thread. | the owner thread recorded on the claim; `failIfHoldingContext` in `acquire` |
+| I26 | A thread waiting for a context holds no context of another pool, so two full rings can never wait on each other. | `failIfHoldingForeignContext` on `acquire`'s slow path, walking the pool registry under `execPoolsMutex` |
 | I17 | Retain, submit and abandon only by the claim holder's thread. | `failUnlessOwner` |
 | I18 | `waitAll` (idle wait and destruction) only from a thread holding no context of the pool. | `failIfHoldingContext` in `waitAll` |
 | I19 | A pool is never destroyed while any thread holds one of its contexts. | `failIfAnyContextHeld` in the destructor, after unregistration, when a claim can only mean a thread still using the pool |
@@ -220,10 +222,12 @@ own recording. W3 is gone with I21. W6 is what the gate's poll now exists for.
 
 P1 to P4 of the earlier revision are now I15 to I18, P6 and P9 are I19 and I20, P5 is I21 (as
 "not metered" rather than fatal, since the typed calls count bytes on their own and a transfer
-pool that copies GPU frames has to read them), P11 and P12 are I22 and I23, and P17 is I24 (the
-skip it removed dated from timelines dying with their pools, before they were counted). Each of
-the rest would delete a further class of interleavings from what must be reasoned about; P13 is
-a design change, the others are cheap.
+pool that copies GPU frames has to read them), P11 and P12 are I22 and I23, P17 is I24 (the
+skip it removed dated from timelines dying with their pools, before they were counted), and P14
+is I26 -- narrowing the contract rather than defending it, since a survey of every pool user in
+the tree found none holding two contexts and no reason to: the dependency that would motivate
+it travels as a timeline value. Each of the rest would delete a further class of interleavings
+from what must be reasoned about; P13 is a design change, the others are cheap.
 
 | # | Candidate | Enforce by | Eliminates |
 |---|---|---|---|
@@ -231,7 +235,6 @@ a design change, the others are cheap.
 | P8 | No lock held during callbacks, checked rather than argued. | debug wrappers on `cacheLock` and `execPoolsMutex` that record the owner; `runReleases` asserts the current thread owns neither | regressions of I7 by a future caller |
 | P10 | Every event that reduces the byte total wakes the gate. | a second timeline that only the host signals, once per settle; the gate waits on it and the progress timeline with `VK_SEMAPHORE_WAIT_ANY_BIT` | W6, and with it the gate's 50 ms poll, which can then go entirely |
 | P13 | Freeing a GPU frame never waits on the GPU. | a plane whose producer is still pending hands its buffer to a device-level deferred list keyed by the pair, reaped by the existing sweeps and at teardown, instead of the wait in `~VSPlaneData` | the eviction stall under `cacheLock` on a just-produced frame, and the deadlock where that work depends on a host signal from a thread blocked on `cacheLock` |
-| P14 | A thread waiting for a claim on one pool holds no context of a pool created after it. | on acquire's slow path only, walk the registry for contexts owned by this thread and fail on a later pool; or size the ring to the worker count so workers never wait | cross-pool circular waits when rings are full |
 | P15 | A producer is published only on a plane whose plane data is unique. | fatal in both publication paths when `VSPlaneData::unique()` is false | a filter writing into a copied GPU frame, which shares plane data and corrupts the original silently |
 | P16 | After device loss every wait returns an error, every retention is still released once, and destruction completes. | nothing in code; a probe that forces a driver timeout with an infinite shader loop, then exercises acquire, `waitAll` and free | the unverified assumption behind every unbounded wait |
 

@@ -582,6 +582,13 @@ public:
     void waitExecReleases(VSVulkanExecPool *pool);
     void waitForeignExecReleases();
     void failIfRunningReleases(const char *what);
+    /* Fatal when the calling thread holds a context of any pool other than `self`. Two threads
+       each holding one pool's context and waiting for the other's, with both rings full, is
+       the one way the exec pools can deadlock among themselves, and holding two buys nothing:
+       a dependency between pools travels as a timeline value, so one recording is submitted
+       and released before the next is acquired. Called from acquire's slow path only -- the
+       fast path never waits, and this walk costs the registry lock. */
+    void failIfHoldingForeignContext(const VSVulkanExecPool *self, const char *what);
     void sweepExecPools();
 
     /* The in-flight retention budget. Per pool contextCount caps multiply across a graph's

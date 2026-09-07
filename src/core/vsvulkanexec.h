@@ -234,6 +234,10 @@ public:
     /* Points every slot's public handle at its slot and at the public pool, once, before any
        thread can see a handle. */
     void bindHandles(VSGPUExecPool *owner);
+    /* Whether the calling thread holds one of this pool's contexts. Reads only the claim and
+       its owner, both atomic, so the device can ask every registered pool while holding the
+       registry lock. */
+    bool holdsContextOwnedByThisThread() const;
     /* Fatal unless the calling thread is the one holding the context's claim. The public
        entry points check their handle through this before touching anything, which is what
        makes a handle used after its submit or abandon a named error rather than a read of

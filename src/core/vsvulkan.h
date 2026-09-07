@@ -324,9 +324,15 @@ struct VSGPUMemory {
 /* The public handle from VSVULKANAPI::reserveGPUMemory: the published byte total and the
    references keeping the accounting reachable. The core pointer is touched only on increases,
    which a live filter performs while the core is necessarily alive; a late release goes through
-   the device's accounting callback, which outlives the core by design. */
+   the device's accounting callback, which outlives the core by design.
+
+   The total is a plain value under the mutex rather than an atomic, deliberately: an atomic
+   exchange makes the publication look safe on its own while leaving the accounting that follows
+   it unordered, which is exactly the bug the mutex exists to prevent. Per reservation, so
+   updates to different ones never contend. */
 struct VSGPUMemoryReservation {
-    std::atomic<int64_t> bytes{ 0 };
+    std::mutex lock;
+    int64_t bytes = 0;
     VSVulkanDevice *device = nullptr;
     VSCore *core = nullptr;
 };

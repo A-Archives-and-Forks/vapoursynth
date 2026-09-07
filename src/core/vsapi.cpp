@@ -1677,12 +1677,28 @@ static void VS_CC vkGPUExecRetain(VSGPUExecContext *context, VSGPUReleaseFunc re
         context->owner->pool.retain(*context->context, release, object, bytes);
 }
 
+/* Publishing the total and applying its accounting delta are one operation, because doing them
+   in two steps is not enough however atomically each step is done: the header promises that
+   concurrent updates are safe and that the last total wins, and two updates whose exchanges
+   ordered one way could still reach accountAllocation the other way round, subtracting bytes
+   that had not been added yet. The GPU counter is unsigned, so that underflowed to something
+   astronomical, `is_gpu_over_limit` went true and the next pressure sweep evicted every cached
+   GPU frame; and MemoryUse counts one lifetime unit per accounted byte, so a subtraction
+   arriving before its addition could consume the core's own unit and delete the accounting
+   object under a live core. */
 static void reservationSetBytes(VSGPUMemoryReservation *reservation, int64_t bytes) {
-    const int64_t previous = reservation->bytes.exchange(bytes, std::memory_order_relaxed);
-    const int64_t delta = bytes - previous;
-    if (!delta)
-        return;
-    reservation->device->accountAllocation(delta);
+    int64_t delta;
+    {
+        std::lock_guard<std::mutex> lock(reservation->lock);
+        delta = bytes - reservation->bytes;
+        if (!delta)
+            return;
+        reservation->bytes = bytes;
+        reservation->device->accountAllocation(delta);
+    }
+    /* Outside that lock: eviction runs release callbacks, and a callback must never come to
+       depend on a reservation's lock. Only an increase gets here, which is also what keeps the
+       core out of the release path -- see the handle's comment. */
     if (delta > 0) {
         const size_t limit = reservation->core->memory->gpu_limit();
         if (limit && reservation->core->memory->gpu_allocated_bytes() > limit)
@@ -1716,9 +1732,11 @@ static void VS_CC vkUpdateGPUMemoryReservation(VSGPUMemoryReservation *reservati
 static void VS_CC vkReleaseGPUMemoryReservation(VSGPUMemoryReservation *reservation) VS_NOEXCEPT {
     if (!reservation)
         return;
-    const int64_t held = reservation->bytes.exchange(0, std::memory_order_relaxed);
-    if (held)
-        reservation->device->accountAllocation(-held);
+    /* Through the same path as an update, so a release and an update cannot land their
+       accounting out of order either. The delta is never positive here, so nothing reaches the
+       core. Releasing concurrently with an update of the same handle stays the caller's error:
+       the handle is destroyed below. */
+    reservationSetBytes(reservation, 0);
     reservation->device->release();
     delete reservation;
 }

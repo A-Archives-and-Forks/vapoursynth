@@ -600,7 +600,8 @@ struct VSVULKANAPI {
        bytes is an absolute total, not a delta, so publishing what you hold makes drift
        impossible however the calls interleave. Concurrent updates are safe and the last total
        wins; negative counts as zero. release drops the reservation with the handle, ignores
-       NULL, and belongs in the filter free callback.
+       NULL, and belongs in the filter free callback -- it destroys the handle, so unlike an
+       update it may not overlap another call on the same reservation.
 
        Only declare memory on the core's device -- match deviceUUID or deviceLUID from
        getVulkanCoreInfo -- and never declare bytes the core already accounts (createGPUBuffer,

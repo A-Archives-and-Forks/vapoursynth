@@ -29,6 +29,7 @@ pool has one context per staging slot and never retains anything.
 
 | Lock | Guards |
 |---|---|
+| `VSCore::vulkanDeviceLock` | bringing the device up, nothing after: the device is internally synchronized and the pressure and accounting paths reach it through the atomic `vulkanDev` without taking this |
 | `VSVulkanDevice::execPoolsMutex` + `execReleaseCv` | the pool registry, the batch registry, `nextExecReleaseBatch`, creation of the progress semaphore |
 | `VSVulkanExecPool::claimMutex` + `claimCv` | nothing but the rendezvous between a full ring and `releaseClaim`; the claim itself is the atomic `claimed` |
 | `VSVulkanQueue` | `vkQueueSubmit2`, `nextValue`, `execProgressNext`. The only lock here a plugin can hold, through `lockVulkanQueue` |
@@ -36,13 +37,33 @@ pool has one context per staging slot and never retains anything.
 | allocator mutex | blocks and free lists |
 | `VSCore::cacheLock` | the set of nodes with caches |
 | `VSNode::cacheMutex` | one node's cache and consumer list |
+| `VSCore::logMutex` | the message handler list, held across the dispatch to each handler; recursive, and the only lock here that runs code the core did not write |
 
-Order, outermost first: `execPoolsMutex` before `claimMutex` (a device sweep releases claims
-while walking the registry); `flushMutex` before the queue lock, which the flush takes while
-holding it; `cacheLock` before `cacheMutex` (eviction); the queue lock and the allocator mutex
-take nothing themselves. `registerCache` is called
+Order, outermost first: `vulkanDeviceLock` before `execPoolsMutex` and `logMutex` (bringing the
+device up registers the transfer pool and logs the device line); `execPoolsMutex` before
+`claimMutex` (a device sweep releases claims while walking the registry); `cacheLock` before
+`cacheMutex` (eviction) and both before the allocator mutex (`trimAllocator` under the first, an
+evicted GPU frame returning its regions under the second); `flushMutex` before the queue lock,
+which the flush takes while holding it. The queue lock and the allocator mutex take nothing
+themselves. `registerCache` is called
 after `cacheMutex` is released, never under it. **No lock in this table is held while a release
 callback runs**, and `execPoolsMutex` is never held while calling into anything a plugin wrote.
+
+That is the whole graph rather than a summary of it, and it is measured rather than argued:
+every lock acquisition in the core was instrumented to record what the acquiring thread already
+held, and the result collected over the test suite, the GPU harness, the concurrency and
+pressure workloads with and without forced staging, and a probe driving the entry points those
+miss -- reservations, `waitGPUFrame`'s flush, `abandon`, `waitIdle`. No pair appeared in both
+orders, and nothing was held across a filter's `getFrame`, a release callback, a filter free
+callback or a plugin function's invoke. An edge added here should be rechecked the same way; the
+instrumentation is a scoped object recording the thread's held set after each lock acquisition,
+plus one check at each of those four boundaries, and is cheap to rebuild.
+
+`vulkanDeviceLock` before `logMutex` costs nothing inside the core and is written down for what
+it means outside it: `logMessage` dispatches to handlers, and the Python handler takes the GIL,
+so a lock held across a log call is one a Python binding may not block on while holding the GIL.
+That reversal on this very lock once froze the whole interpreter, which is why the Vulkan
+bindings in `vapoursynth.pyx` release the GIL around every call that can reach device creation.
 
 The queue lock is a leaf and has to stay one (I28), because it is the one lock in this table a
 plugin holds: `lockVulkanQueue` hands it out for raw submissions. `detachCompleted` used to take
@@ -270,7 +291,7 @@ others are cheap.
 | # | Candidate | Enforce by | Eliminates |
 |---|---|---|---|
 | P7 | Per-pool byte identity. | keep a per-pool counted sum; assert zero at pool destruction and a zero device total at device destruction, in a self-check mode beside `VS_VULKAN_VALIDATION` | accounting drift going unnoticed until the gate stalls |
-| P8 | No lock held during callbacks, checked rather than argued. | debug wrappers on `cacheLock` and `execPoolsMutex` that record the owner; `runReleases` asserts the current thread owns neither | regressions of I7 by a future caller |
+| P8 | No lock held during callbacks, and no pair of locks taken in both orders, checked rather than argued. | done once with temporary instrumentation on every lock acquisition, whose result is the order paragraph in section 2; making it standing means a scoped record on each lock plus a check in `runReleases` and at the three other plugin boundaries, under the flag `VS_VULKAN_VALIDATION` already sets | regressions of I7, and of section 2's order, by a future caller |
 | P10 | Every event that reduces the byte total wakes the gate. | a second timeline that only the host signals, once per settle; the gate waits on it and the progress timeline with `VK_SEMAPHORE_WAIT_ANY_BIT` | W6, and with it the gate's 50 ms poll, which can then go entirely |
 | P13 | Freeing a GPU frame never waits on the GPU. | a plane whose producer is still pending hands its buffer to a device-level deferred list keyed by the pair, reaped by the existing sweeps and at teardown, instead of the wait in `~VSPlaneData` | the eviction stall under `cacheLock` on a just-produced frame, and the deadlock where that work depends on a host signal from a thread blocked on `cacheLock` |
 | P16 | After device loss every wait returns an error, every retention is still released once, and destruction completes. | nothing in code; a probe that forces a driver timeout with an infinite shader loop, then exercises acquire, `waitAll` and free | the unverified assumption behind every unbounded wait |

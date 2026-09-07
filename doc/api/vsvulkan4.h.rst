@@ -1030,6 +1030,15 @@ VSGPUExecPool_ \*createGPUExecPool(VSCore \*core, int queue, char \*errorMessage
 
    Creates an exec pool on one of the core's queues (VSVulkanQueueType_).
 
+   A pool belongs to **one filter instance**: create it in the filter's create
+   function, destroy it in the free callback, and never share one between
+   instances. Nothing about a pool needs sharing — the ring is sized for the
+   threads one instance is called on, and a dependency between two of them
+   travels as a timeline value rather than as a shared recording — while
+   sharing one costs the release callback guarantee of
+   gpuExecPoolWaitIdle_, whose strength comes from the pool being idle at both
+   ends of an instance's life.
+
    A pool on *vqTransfer* may only ever record copies, and does not drive the
    core's progress timeline, so what it retains is kept alive and released as
    usual but does not count against the in-flight budget below, which only
@@ -1091,6 +1100,19 @@ int gpuExecPoolWaitIdle(VSGPUExecPool_ \*pool, char \*errorMessage, int errorMes
    left alone. Call it from a thread holding no context of the pool: holding
    one is fatal, since that recording could never be covered and every worker
    doing the same would deadlock.
+
+   It is a setup call, not a frame path one, and the promise about release
+   callbacks is stated for that use: call it where no other thread can be
+   using the pool. In the create function nothing else can, the node not
+   existing yet; in the free callback nothing else may, the core never
+   destroying a node while a frame request on it runs. Draining from inside
+   ``getFrame`` while sibling threads acquire on the same pool is the case
+   this does not cover — an acquirer is briefly invisible to the reaping this
+   promise is built on, so the wait may return just before that context's
+   callbacks run. The GPU is idle either way; what can be early is only the
+   host side release. Together with one pool per filter instance
+   (createGPUExecPool_), the two rules leave no moment at which this call can
+   race an acquire.
 
 ----------
 

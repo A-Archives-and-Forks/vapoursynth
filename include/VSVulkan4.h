@@ -646,6 +646,12 @@ struct VSVULKANAPI {
        already holds never gates that thread. Filters notice nothing but an occasional
        slower acquire when a graph runs far ahead of the GPU. The pool's timeline is created exportable when the
        device can, so consumers in other APIs can wait the producer pairs it publishes.
+       A pool belongs to ONE filter instance: create it in the filter's create function,
+       destroy it in the free callback, and never share one between instances. Nothing about
+       a pool needs sharing -- the ring is sized for the threads one instance is called on,
+       and a dependency between two of them travels as a timeline value rather than as a
+       shared recording -- while sharing one costs the guarantee below, whose whole strength
+       comes from the pool being idle at both ends of an instance's life.
        Destroy it in the filter's free callback; freeGPUExecPool drains the GPU first, so
        everything it still holds is released safely, and it returns only once every release
        callback the pool registered has run, so instance data can go right after it. A
@@ -671,7 +677,17 @@ struct VSVULKANAPI {
        of a concurrent core sweep that reached it first, which is waited for; recordings
        other threads hold at the time are not submissions yet and are left alone. Call it
        from a thread holding no context of the pool: holding one is fatal, since that
-       recording could never be covered and every worker doing the same would deadlock. */
+       recording could never be covered and every worker doing the same would deadlock.
+
+       It is a setup call, not a frame path one, and the promise about release callbacks is
+       stated for that use: call it where no other thread can be using the pool. In the create
+       function nothing else can, the node not existing yet; in the free callback nothing else
+       may, the core never destroying a node while a frame request on it runs. Draining from
+       inside getFrame while sibling threads acquire on the same pool is the case this does not
+       cover -- an acquirer is briefly invisible to the reaping this promise is built on, so the
+       wait may return just before that context's callbacks run. The GPU is idle either way;
+       what can be early is only the host side release. Together with one pool per filter
+       instance, the two rules leave no moment at which this call can race an acquire. */
     int (VS_CC *gpuExecPoolWaitIdle)(VSGPUExecPool *pool, char *errorMessage, int errorMessageSize) VS_NOEXCEPT;
 
     /* The pool's timeline as the counted object setGPUPlaneProducer takes, for publishing

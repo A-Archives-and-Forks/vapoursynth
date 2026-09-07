@@ -316,12 +316,15 @@ VSVulkanExecContext *VSVulkanExecPool::acquire(std::string &errorMessage) {
     /* The GPU may still be chewing on this context's previous submission. Waiting it out here,
        outside every lock, is what lets the other contexts keep submitting meanwhile.
 
-       What that submission retained is registered as a batch before the wait, not after it:
-       from the moment the claim was won no sweep can reach it, and this thread is the one that
-       will release it, so a waitAll elsewhere, or an allocation that failed at the driver, has
-       to be able to wait for it now. The GPU finishing while the acquirer is still waking is
-       exactly the window in which that memory would otherwise be unreachable by anyone. A
-       never submitted context retains nothing: abandon and a failed submit release at once. */
+       What that submission retained is registered as a batch before the wait, not after it,
+       so a waitAll elsewhere, or an allocation that failed at the driver, can wait for it: the
+       GPU finishing while the acquirer is still waking is exactly the window in which that
+       memory would otherwise be unreachable by anyone. Note that this is a few instructions
+       later than the claim, which hid the context from every sweep the moment it was won, so a
+       waitAll landing in between sees neither and reads the pool as clean. Nothing closes that
+       in code; the pool ownership and setup-only rules on gpuExecPoolWaitIdle mean no wait can
+       be there to see it. A never submitted context retains nothing: abandon and a failed
+       submit release at once. */
     if (context->pendingValue) {
         const bool holds = !context->retained.empty();
         if (holds)

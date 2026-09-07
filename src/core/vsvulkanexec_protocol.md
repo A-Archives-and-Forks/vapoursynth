@@ -99,11 +99,24 @@ completed one settles the bytes and moves the list out before dropping the claim
 only after that, from a local list, with no lock held.
 
 Every batch of releases is registered on the device for as long as it runs, as `{pool, thread,
-id}`, whichever reaper runs it; `acquire` registers from the moment it wins the claim, because
-from then on no sweep can reach that context. Both sweeps register while still holding
+id}`, whichever reaper runs it. Both sweeps register while still holding
 `execPoolsMutex`, in the same critical section that detached the retentions, so there is no
 moment at which they belong to neither a context nor a batch -- which a concurrent `waitAll`
-would read as "everything has been released". The waits built on the registry:
+would read as "everything has been released".
+
+`acquire` cannot register that early, and the gap is worth naming because the code once claimed
+otherwise. Winning a claim hides a context from every sweep immediately, but the batch is
+registered a few instructions later, so a `waitAll` landing in between finds no claimable context
+and no batch and concludes the pool is clean while a completed submission's callbacks have not
+run. The tail of `submit` has the same shape, the context staying claimed after the queue is
+unlocked. **This is closed by contract rather than by code**: a pool belongs to one filter
+instance and `gpuExecPoolWaitIdle` is a setup call, so the wait happens where the node does not
+yet exist or where no frame request may run, and there is no acquire to race. Both halves are in
+VSVulkan4.h; without either of them the window is reachable, which is why they are rules and not
+advice. Note what is never at stake: `waitAll` waits the timeline first, so the GPU is idle
+regardless -- only the host side release can be late.
+
+The waits built on the registry:
 
 | Wait | Waits for | Bound | Own-thread batch for the pool |
 |---|---|---|---|
@@ -193,7 +206,7 @@ rung 1 waits.
 | I2 | A retention list is appended only by the claim holder and moved out only under the claim. | construction; no code reads a list unclaimed |
 | I3 | Every retention's release runs exactly once, after its submission completed or after the recording was abandoned or failed. | lists are moved out before running; `pendingValue <= counter` gates detach |
 | I4 | `execRetainedBytes` equals the sum over counted contexts and never underflows. | add under the claim at submit; subtract once at settle under the claim; uncounted paths never subtract |
-| I5 | Every batch of releases is registered on the device for its whole duration, from the claim in `acquire`'s case. | begin/end around every `runReleases` site |
+| I5 | Every batch of releases is registered on the device for its whole duration. In `acquire` the registration follows the claim by a few instructions rather than coinciding with it, and the same holds in the tail of `submit`; what makes that unobservable is the pool ownership and setup-only rules on `gpuExecPoolWaitIdle`, not the registry. | begin/end around every `runReleases` site; the rules in VSVulkan4.h |
 | I6 | `freeGPUExecPool` and `gpuExecPoolWaitIdle` return only when no other thread holds a batch for the pool; an own batch is fatal, never silently skipped. | `unregisterExecPool`, `waitExecReleases`, `failIfInsideOwnBatch` |
 | I7 | No lock from section 2 is held while a release callback runs. | sweeps detach under the lock and run after it; `notifyCaches` sweeps before `cacheLock`; the ladder and the gate hold nothing |
 | I8 | The lock order in section 2. | construction; `registerCache` after `cacheMutex` is released |
